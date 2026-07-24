@@ -1,0 +1,16 @@
+# Local credentials and caches
+config.json
+.env
+.immich_aesthetic_cache.json
+
+# Python virtual environment and bytecode
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local IDE folders
+.vscode/
+.idea/
+.DS_Store

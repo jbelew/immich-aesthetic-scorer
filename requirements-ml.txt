@@ -1,0 +1,6 @@
+# Optional dependencies (required for local CLIP aesthetics and Stage 2 MUSIQ technical scoring)
+torch
+torchvision
+transformers
+simple-aesthetics-predictor
+pyiqa

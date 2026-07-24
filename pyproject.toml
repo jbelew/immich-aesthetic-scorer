@@ -1,0 +1,24 @@
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "C90", # mccabe complexity
+]
+ignore = ["E501", "C901"]
+
+[tool.pyright]
+include = ["score_assets.py"]
+pythonVersion = "3.9"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
