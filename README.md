@@ -1,5 +1,7 @@
 # Immich Aesthetic Scorer
 
+[![CI](https://github.com/jbelew/immich-aesthetic-scorer/actions/workflows/ci.yml/badge.svg)](https://github.com/jbelew/immich-aesthetic-scorer/actions/workflows/ci.yml)
+
 This tool automates finding the best images of a specific person or album in an **Immich** photo library. It downloads the images, scores them using **Google Gemini**, an **OpenAI-compatible provider** (like OpenAI, Groq, OpenRouter, or local Ollama), or a **local CLIP-based machine learning model**, and adds the top 100 images (or a custom amount) into a new or existing highlight album.
 
 ## Why Did I Build This?
