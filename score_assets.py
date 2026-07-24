@@ -134,26 +134,6 @@ STAGE1_AESTHETIC_PROMPT = (
     "You must return a JSON object with 'score' (integer 0-100) and 'reason' (brief 1-sentence explanation of the score)."
 )
 
-STAGE2_TECHNICAL_PROMPT = (
-    "You are an expert photography technician. Evaluate the TECHNICAL QUALITY of this photo "
-    "specifically focusing on focus sharpness, camera shake, motion blur, noise/grain, and exposure clarity.\n\n"
-    "IMPORTANT: You are analyzing a high-resolution preview of the photo. Focus specifically on whether "
-    "the main subject's eyes, face, and details are sharp and clear, or if they are blurry, soft, or out of focus.\n\n"
-    "Grade the photo from 0 to 100 based on the following technical criteria:\n"
-    "1. Sharpness & Focus Precision (0-40 pts): Are the subject's features in crisp, tack-sharp focus? Deduct heavily for motion blur, camera shake, missed focus, or general softness.\n"
-    "2. Noise & Grain (0-20 pts): Is the image clean and clear, or is it excessively grainy, digital-noisy, or pixelated due to low-light compression?\n"
-    "3. Exposure & Contrast (0-20 pts): Is the exposure technically correct (no clipped highlights, no muddy underexposed shadows)?\n"
-    "4. Artifacts & Imperfections (0-20 pts): Are there lens flares, chromatic aberration, sensor dust, or digital compression artifacts?\n\n"
-    "Scoring Guide:\n"
-    "- 90-100: Tack-sharp focus on the subject, perfectly clean, technically flawless.\n"
-    "- 75-89: Very sharp, minimal softness or minor technical imperfections.\n"
-    "- 50-74: Acceptable sharpness, but has noticeable softness, moderate noise, or minor focus error.\n"
-    "- 20-49: Blurry, out of focus, strong camera shake, or very high noise/compression artifacts.\n"
-    "- 0-19: Completely out of focus, severely blurred, corrupted, or blank/ruined capture.\n\n"
-    "You must return a JSON object with 'score' (integer 0-100) and 'reason' (brief 1-sentence explanation of the technical score)."
-)
-
-
 # ANSI escape codes for terminal coloring
 COLOR_RESET = "\033[0m"
 COLOR_BOLD = "\033[1m"
