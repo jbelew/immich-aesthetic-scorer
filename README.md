@@ -40,7 +40,7 @@ For large image sets, scoring every single photo using commercial APIs (like Goo
 The most cost-effective and high-quality setup is to use a **Hybrid Two-Stage Configuration**:
 
 1. **Stage 1 (Local Aesthetics Filtering)**: Evaluate your entire library locally for free using the fast, local CLIP-based model (`rsinema/aesthetic-scorer`). This runs 100% offline, costs nothing, and filters out obviously bad compositions, duplicate burst shots, screenshots, or poor crops.
-2. **Stage 2 (Commercial API Verification)**: Configure Stage 2 to use a commercial API (like Gemini `gemini-3.1-flash-lite` or OpenAI `gpt-4o-mini`) and set `stage2_top_pct` to a target percentage (e.g., `10%` to `15%`).
+2. **Stage 2 (Commercial API Verification)**: Configure Stage 2 to use a commercial API (like Gemini `gemini-2.5-flash` or OpenAI `gpt-4o-mini`) and set `stage2_top_pct` to a target percentage (e.g., `10%` to `15%`).
 
 This hybrid setup ensures that:
 - **90%** of candidate photos are filtered out for free by the local model.
@@ -124,7 +124,7 @@ See [config.json.example](./config.json.example) for a complete template file.
   "dedup_window": 120,
   "two_stage": true,
   "stage2_top_pct": 15.0,
-  "stage2_model": "gemini-3.1-flash-lite",
+  "stage2_model": "gemini-2.5-flash",
   "stage2_weight": 0.5
 }
 ```
@@ -180,7 +180,7 @@ If critical parameters (like Immich Server URL and API Key) are missing from the
 | `--album-id` | Immich Album UUID to source photos from (Mutually exclusive with `--person-id`) | Interactive search if omitted (choice) |
 | `--scorer-type` | Scoring method: `gemini`, `local`, or `openai` | `gemini` |
 | `--gemini-key` | Google Gemini developer API key | Prompt / Environment |
-| `--gemini-model`| Gemini model ID to use | `gemini-3.1-flash-lite` |
+| `--gemini-model`| Gemini model ID to use | `gemini-2.5-flash` |
 | `--openai-key` | OpenAI API Key (or for compatible providers) | Prompt / Environment |
 | `--openai-url` | Base URL for OpenAI-compatible provider | `https://api.openai.com/v1` |
 | `--openai-model`| Model ID for OpenAI-compatible provider | `gpt-4o-mini` |
@@ -193,7 +193,7 @@ If critical parameters (like Immich Server URL and API Key) are missing from the
 | `--dedup-window`| Deduplicate burst photos within N seconds | `0` (Disabled) |
 | `--two-stage` | Enable two-stage scoring (Stage 1 Aesthetics, Stage 2 Local Technical Quality or Remote Advanced Aesthetics) | Off |
 | `--stage2-top-pct`| Percentage of top candidates to evaluate in Stage 2 | `15.0` |
-| `--stage2-model`| Model ID for Stage 2 evaluation (e.g. `musiq-spaq`, `gemini-3.1-flash-lite`, `gpt-4o-mini`) | `musiq-spaq` |
+| `--stage2-model`| Model ID for Stage 2 evaluation (e.g. `musiq-spaq`, `gemini-2.5-flash`, `gpt-4o-mini`) | `musiq-spaq` |
 | `--stage2-weight`| Balance weight of Stage 2 score in combined total (0.0 to 1.0) | `0.5` |
 | `--use-cache-only`| Compile highlight album from cache, skipping scoring | Off |
 | `--cache-file` | Path to the local JSON score cache file | `.immich_aesthetic_cache.json` |

@@ -140,7 +140,7 @@ class TestImmichScorer(unittest.TestCase):
         self.assertIsNone(get_max_dim_for_stage2_model("other-local-model"))
 
         # Assert remote models use 512
-        self.assertEqual(get_max_dim_for_stage2_model("gemini-3.1-flash-lite"), 512)
+        self.assertEqual(get_max_dim_for_stage2_model("gemini-2.5-flash"), 512)
         self.assertEqual(get_max_dim_for_stage2_model("gemini"), 512)
         self.assertEqual(get_max_dim_for_stage2_model("openai/gpt-4o-mini"), 512)
         self.assertEqual(get_max_dim_for_stage2_model("gpt-4o"), 512)

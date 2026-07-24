@@ -561,7 +561,7 @@ def download_thumbnail(immich_url, api_key, asset_id, max_dim: Optional[int] = 5
 
 
 def call_gemini_api(
-    api_key, image_bytes, model_name="gemini-flash-latest", max_retries=5, initial_backoff=4.0
+    api_key, image_bytes, model_name="gemini-2.5-flash", max_retries=5, initial_backoff=4.0
 ):
     """Evaluates the aesthetic quality and composition of an image using Google Gemini API.
 
@@ -843,7 +843,7 @@ def score_image_local(image_bytes, model_id):
 
 
 def call_gemini_api_stage2(
-    api_key, image_bytes, model_name="gemini-3.1-flash-lite", max_retries=5, initial_backoff=4.0
+    api_key, image_bytes, model_name="gemini-2.5-flash", max_retries=5, initial_backoff=4.0
 ):
     """Evaluates the aesthetic quality and composition of an image using Google Gemini API.
 
@@ -1014,9 +1014,7 @@ def score_image_stage2(
 
     model_name_lower = model_name.lower()
     if "gemini" in model_name_lower:
-        api_model = (
-            model_name if model_name != "gemini" else (gemini_model or "gemini-3.1-flash-lite")
-        )
+        api_model = model_name if model_name != "gemini" else (gemini_model or "gemini-2.5-flash")
         if not gemini_key:
             raise ValueError(
                 "Google Gemini API Key is required for Stage 2 scoring when using gemini model."
@@ -1307,9 +1305,7 @@ def main():
         "--local-model",
         help="Hugging Face model ID for local scoring (default: shunk031/aesthetics-predictor-v1-vit-large-patch14)",
     )
-    parser.add_argument(
-        "--gemini-model", help="Gemini model ID to use (default: gemini-flash-latest)"
-    )
+    parser.add_argument("--gemini-model", help="Gemini model ID to use (default: gemini-2.5-flash)")
     parser.add_argument("--openai-key", help="OpenAI API Key (or for OpenAI-compatible providers)")
     parser.add_argument(
         "--openai-url",
@@ -1407,7 +1403,7 @@ def main():
         "local_model_id",
         "shunk031/aesthetics-predictor-v1-vit-large-patch14",
     )
-    gemini_model = resolve(args.gemini_model, "GEMINI_MODEL", "gemini_model", "gemini-flash-latest")
+    gemini_model = resolve(args.gemini_model, "GEMINI_MODEL", "gemini_model", "gemini-2.5-flash")
     openai_key = resolve(args.openai_key, "OPENAI_API_KEY", "openai_api_key", None)
     openai_url = resolve(
         args.openai_url, "OPENAI_BASE_URL", "openai_base_url", "https://api.openai.com/v1"
