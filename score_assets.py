@@ -903,12 +903,28 @@ def call_gemini_api_stage2(
                 score = int(data["score"])
                 return float(score)
             elif r.status_code == 429:
+                print(
+                    f"\n[Gemini API Stage 2] Rate limit hit (429). Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                )
+                time.sleep(backoff)
+                backoff *= 2.0
+            elif r.status_code >= 500:
+                print(
+                    f"\n[Gemini API Stage 2] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                )
                 time.sleep(backoff)
                 backoff *= 2.0
             else:
-                time.sleep(backoff)
-                backoff *= 2.0
-        except Exception:
+                raise Exception(f"Gemini API error {r.status_code}: {r.text}")
+        except Exception as e:
+            # Do not retry on permanent API errors (like 400, 403, 404, etc.)
+            if "Gemini API error" in str(e):
+                raise e
+            if attempt == max_retries - 1:
+                raise e
+            print(
+                f"\n[Gemini API Stage 2] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+            )
             time.sleep(backoff)
             backoff *= 2.0
 
@@ -1671,10 +1687,11 @@ def main():
                 else:
                     with gemini_call_lock:
                         elapsed = time.time() - last_gemini_call_time
-                        needed_delay = delay if delay > 0 else 4.5
-                        if elapsed < needed_delay:
-                            time.sleep(needed_delay - elapsed)
-                        last_gemini_call_time = time.time()
+                        needed_delay = delay if delay is not None else 4.0
+                        sleep_time = max(0.0, needed_delay - elapsed)
+                        last_gemini_call_time = time.time() + sleep_time
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
 
                     if scorer_type == "gemini":
                         score_res = call_gemini_api(gemini_key, img_bytes, model_name=gemini_model)
@@ -1877,10 +1894,11 @@ def main():
                     if not is_local_s2:
                         with gemini_call_lock:
                             elapsed = time.time() - last_gemini_call_time
-                            needed_delay = delay if delay > 0 else 4.5
-                            if elapsed < needed_delay:
-                                time.sleep(needed_delay - elapsed)
-                            last_gemini_call_time = time.time()
+                            needed_delay = delay if delay is not None else 4.0
+                            sleep_time = max(0.0, needed_delay - elapsed)
+                            last_gemini_call_time = time.time() + sleep_time
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
 
                     # Score using Stage 2 model (like MUSIQ)
                     raw_s2 = score_image_stage2(
