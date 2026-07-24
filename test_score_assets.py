@@ -51,6 +51,7 @@ class TestImmichScorer(unittest.TestCase):
 
         details = get_person_details(self.immich_url, self.api_key, "person-uuid")
         self.assertIsNotNone(details)
+        assert details is not None
         self.assertEqual(details["name"], "Madeline")
 
     @patch("score_assets.requests.get")
@@ -62,6 +63,7 @@ class TestImmichScorer(unittest.TestCase):
 
         details = get_album_details(self.immich_url, self.api_key, "album-uuid")
         self.assertIsNotNone(details)
+        assert details is not None
         self.assertEqual(details["albumName"], "Cheezy Champs")
 
     @patch("score_assets.requests.post")
@@ -181,6 +183,7 @@ class TestImmichScorer(unittest.TestCase):
 
     def test_score_to_stars(self):
         from score_assets import score_to_stars
+
         self.assertEqual(score_to_stars(95), 5)
         self.assertEqual(score_to_stars(90), 5)
         self.assertEqual(score_to_stars(89), 4)
@@ -194,43 +197,55 @@ class TestImmichScorer(unittest.TestCase):
 
     def test_extract_raw_score_from_reason(self):
         from score_assets import extract_raw_score_from_reason
+
         self.assertEqual(extract_raw_score_from_reason("Local CLIP score: 7.55/10.0"), 7.55)
-        self.assertEqual(extract_raw_score_from_reason("Local CLIP score: 8.0/10.0 (z-score: 1.2)"), 8.0)
+        self.assertEqual(
+            extract_raw_score_from_reason("Local CLIP score: 8.0/10.0 (z-score: 1.2)"), 8.0
+        )
         self.assertIsNone(extract_raw_score_from_reason("Some other reason"))
         self.assertIsNone(extract_raw_score_from_reason(None))
 
     def test_parse_asset_time(self):
         import datetime
+
         from score_assets import parse_asset_time
 
         # Test localDateTime
         self.assertEqual(
             parse_asset_time({"asset": {"localDateTime": "2026-07-24T10:00:00"}}),
-            datetime.datetime(2026, 7, 24, 10, 0, 0)
+            datetime.datetime(2026, 7, 24, 10, 0, 0),
         )
         # Test with milliseconds and Z suffix
         self.assertEqual(
             parse_asset_time({"asset": {"fileCreatedAt": "2026-07-24T10:00:00.123456Z"}}),
-            datetime.datetime(2026, 7, 24, 10, 0, 0, 123456)
+            datetime.datetime(2026, 7, 24, 10, 0, 0, 123456),
         )
         # Test missing / invalid fallback
         self.assertEqual(
-            parse_asset_time({"asset": {"createdAt": "invalid-date-string"}}),
-            datetime.datetime.min
+            parse_asset_time({"asset": {"createdAt": "invalid-date-string"}}), datetime.datetime.min
         )
-        self.assertEqual(
-            parse_asset_time({}),
-            datetime.datetime.min
-        )
+        self.assertEqual(parse_asset_time({}), datetime.datetime.min)
 
     def test_deduplicate_bursts(self):
         from score_assets import deduplicate_bursts
 
         scored_assets = [
             {"id": "a1", "score": 80, "asset": {"localDateTime": "2026-07-24T10:00:00"}},
-            {"id": "a2", "score": 90, "asset": {"localDateTime": "2026-07-24T10:00:05"}}, # Within 10s of a1, higher score
-            {"id": "a3", "score": 85, "asset": {"localDateTime": "2026-07-24T10:00:08"}}, # Within 10s of a1, lower score
-            {"id": "a4", "score": 70, "asset": {"localDateTime": "2026-07-24T10:00:25"}}, # New group, 20s later
+            {
+                "id": "a2",
+                "score": 90,
+                "asset": {"localDateTime": "2026-07-24T10:00:05"},
+            },  # Within 10s of a1, higher score
+            {
+                "id": "a3",
+                "score": 85,
+                "asset": {"localDateTime": "2026-07-24T10:00:08"},
+            },  # Within 10s of a1, lower score
+            {
+                "id": "a4",
+                "score": 70,
+                "asset": {"localDateTime": "2026-07-24T10:00:25"},
+            },  # New group, 20s later
         ]
 
         # Case 1: Deduplication disabled (dedup_window <= 0)

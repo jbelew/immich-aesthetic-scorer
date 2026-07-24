@@ -18,7 +18,7 @@ repos:
       - id: ruff
         args: [ --fix ]
 
-  - repo: https://github.com/pre-commit/mirrors-pyright
+  - repo: https://github.com/RobertCraigie/pyright-python
     rev: v1.1.368
     hooks:
       - id: pyright

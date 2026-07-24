@@ -6,7 +6,7 @@ This tool automates finding the best images of a specific person or album in an 
 
 This project was born out of a desire to replicate the ambient slideshow feature of a Google Nest Display. I wanted a way to showcase a curated, high-quality stream of the best photos of my daughter throughout the years on a digital frame.
 
-Doing this manually across a library of over 30,000 images is a monumental task. While Immich does an excellent job of grouping photos by facial recognition, I was still left with over 3,000 images, and Immich doesn't rank them by quality. This tool automates the process by scoring compositions, picking the best facial expressions, filtering out technical defects (like camera shake, motion blur, and noise), and compiling the top-scoring highlights directly into a showcase album ready for display. Additionally, to prevent the highlight album from being cluttered with repetitive shots, a burst deduplication feature groups photos taken within a customizable time window and retains only the single highest-scoring highlight from each burst group. 
+Doing this manually across a library of over 30,000 images is a monumental task. While Immich does an excellent job of grouping photos by facial recognition, I was still left with over 3,000 images, and Immich doesn't rank them by quality. This tool automates the process by scoring compositions, picking the best facial expressions, filtering out technical defects (like camera shake, motion blur, and noise), and compiling the top-scoring highlights directly into a showcase album ready for display. Additionally, to prevent the highlight album from being cluttered with repetitive shots, a burst deduplication feature groups photos taken within a customizable time window and retains only the single highest-scoring highlight from each burst group.
 
 ## System Architecture & Data Flow
 
@@ -33,7 +33,7 @@ graph TD
 
 ## Recommended Workflow (Cost & Quality Optimization)
 
-For large image sets, scoring every single photo using commercial APIs (like Google Gemini or OpenAI GPT) can become expensive or run into rate limits. 
+For large image sets, scoring every single photo using commercial APIs (like Google Gemini or OpenAI GPT) can become expensive or run into rate limits.
 
 The most cost-effective and high-quality setup is to use a **Hybrid Two-Stage Configuration**:
 

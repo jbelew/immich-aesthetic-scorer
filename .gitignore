@@ -2,6 +2,7 @@
 config.json
 .env
 .immich_aesthetic_cache.json
+.ruff_cache
 
 # Python virtual environment and bytecode
 .venv/

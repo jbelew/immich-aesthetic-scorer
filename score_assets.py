@@ -14,9 +14,11 @@ import os
 import sys
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from getpass import getpass
+from typing import Any, Optional
 
 import requests
 from tqdm import tqdm
@@ -31,7 +33,7 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 
 # Silence optional libraries warnings (like unauthenticated requests) using the warnings filter
-import warnings
+
 
 warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
@@ -39,6 +41,14 @@ warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
 # Set up logging levels to silence verbose warnings/report tables from Hugging Face & Transformers
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("transformers").setLevel(logging.ERROR)
+
+# Define optional ML modules as Any to satisfy static type checking for conditional imports
+torch: Any = None
+nn: Any = None
+Image: Any = None
+CLIPProcessor: Any = None
+CLIPVisionModel: Any = None
+pyiqa: Any = None
 
 # Import local scoring libraries globally at startup to prevent thread-safety races during parallel execution
 try:
@@ -48,52 +58,51 @@ try:
     import torch.nn as nn
     from PIL import Image
     from transformers import CLIPProcessor, CLIPVisionModel
-
-    class RsinemaAestheticScorer(nn.Module):
-        """PyTorch Module wrapping CLIP Vision model with multiple aesthetic classification heads.
-
-        Extracts 768-dimensional visual features using a pre-trained CLIP vision backbone
-        and evaluates them across seven aesthetic and technical attributes: overall aesthetics,
-        technical quality, composition, lighting, color harmony, depth of field, and semantic content.
-        """
-
-        def __init__(self):
-            super().__init__()
-            self.backbone = CLIPVisionModel.from_pretrained(
-                "openai/clip-vit-base-patch32", use_safetensors=False
-            ).vision_model
-            self.aesthetic_head = nn.Sequential(nn.Linear(768, 1))
-            self.quality_head = nn.Sequential(nn.Linear(768, 1))
-            self.composition_head = nn.Sequential(nn.Linear(768, 1))
-            self.light_head = nn.Sequential(nn.Linear(768, 1))
-            self.color_head = nn.Sequential(nn.Linear(768, 1))
-            self.dof_head = nn.Sequential(nn.Linear(768, 1))
-            self.content_head = nn.Sequential(nn.Linear(768, 1))
-
-        def forward(self, pixel_values):
-            outputs = self.backbone(pixel_values=pixel_values)
-            pooled = outputs[1]
-            aesthetic = self.aesthetic_head(pooled)
-            quality = self.quality_head(pooled)
-            composition = self.composition_head(pooled)
-            light = self.light_head(pooled)
-            color = self.color_head(pooled)
-            dof = self.dof_head(pooled)
-            content = self.content_head(pooled)
-            return torch.cat([aesthetic, quality, composition, light, color, dof, content], dim=-1)
-
 except ImportError:
-    torch = None
-    nn = None
-    Image = None
-    CLIPProcessor = None
-    CLIPVisionModel = None
-    RsinemaAestheticScorer = None
+    pass
 
 try:
     import pyiqa
 except ImportError:
-    pyiqa = None
+    pass
+
+# Determine dynamic base class for type safety
+BaseModule: Any = nn.Module if nn is not None else object
+
+
+class RsinemaAestheticScorer(BaseModule):
+    """PyTorch Module wrapping CLIP Vision model with multiple aesthetic classification heads.
+
+    Extracts 768-dimensional visual features using a pre-trained CLIP vision backbone
+    and evaluates them across seven aesthetic and technical attributes: overall aesthetics,
+    technical quality, composition, lighting, color harmony, depth of field, and semantic content.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.backbone = CLIPVisionModel.from_pretrained(
+            "openai/clip-vit-base-patch32", use_safetensors=False
+        ).vision_model
+        self.aesthetic_head = nn.Sequential(nn.Linear(768, 1))
+        self.quality_head = nn.Sequential(nn.Linear(768, 1))
+        self.composition_head = nn.Sequential(nn.Linear(768, 1))
+        self.light_head = nn.Sequential(nn.Linear(768, 1))
+        self.color_head = nn.Sequential(nn.Linear(768, 1))
+        self.dof_head = nn.Sequential(nn.Linear(768, 1))
+        self.content_head = nn.Sequential(nn.Linear(768, 1))
+
+    def forward(self, pixel_values):
+        outputs = self.backbone(pixel_values=pixel_values)
+        pooled = outputs[1]
+        aesthetic = self.aesthetic_head(pooled)
+        quality = self.quality_head(pooled)
+        composition = self.composition_head(pooled)
+        light = self.light_head(pooled)
+        color = self.color_head(pooled)
+        dof = self.dof_head(pooled)
+        content = self.content_head(pooled)
+        return torch.cat([aesthetic, quality, composition, light, color, dof, content], dim=-1)
+
 
 # Constants
 DEFAULT_GEMINI_KEY = None
@@ -512,7 +521,7 @@ def fetch_all_image_assets(immich_url, api_key, person_id=None, album_id=None):
     return assets
 
 
-def download_thumbnail(immich_url, api_key, asset_id, max_dim=512):
+def download_thumbnail(immich_url, api_key, asset_id, max_dim: Optional[int] = 512):
     """Downloads uncropped preview thumbnail from Immich and resizes it client-side if specified.
 
     Args:
@@ -805,7 +814,8 @@ def score_image_local(image_bytes, model_id):
                 else:
                     PredictorClass = AestheticsPredictorV1
 
-                local_model = PredictorClass.from_pretrained(model_id).to(device)
+                model_instance: Any = PredictorClass.from_pretrained(model_id)
+                local_model = model_instance.to(device)
                 local_processor = CLIPProcessor.from_pretrained(model_id)
                 local_model.eval()
             print(f"Model loaded successfully on {device}!")
@@ -1579,7 +1589,7 @@ def main():
             default_album = (
                 f"Best of Album {album_name_source}"
                 if album_name_source
-                else f"Best of Album {album_id[:8]}"
+                else f"Best of Album {album_id[:8]}" if album_id else "Best of Album"
             )
         target_album_name = input(f"Enter target album name [{default_album}]: ").strip()
         if not target_album_name:
@@ -1730,7 +1740,9 @@ def main():
         failed_count_s1 = 0
         try:
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                futures = {executor.submit(process_s1_asset, item): item for item in assets_to_score_s1}
+                futures = {
+                    executor.submit(process_s1_asset, item): item for item in assets_to_score_s1
+                }
                 pbar = tqdm(as_completed(futures), total=len(futures), desc="Stage 1 Scoring")
                 for future in pbar:
                     item_res = future.result()
