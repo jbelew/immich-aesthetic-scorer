@@ -1806,7 +1806,6 @@ def main():
             cache_entry.update(
                 {
                     "score": final_score,
-                    "raw_score": raw_s1,
                     "raw_score_stage1": raw_s1,
                     "model_id_stage1": s1_model_name,
                     "reason": reason,
@@ -1818,7 +1817,6 @@ def main():
                 {
                     "id": asset_id,
                     "score": final_score,
-                    "raw_score": raw_s1,
                     "reason": reason,
                     "asset": item["asset"],
                 }
@@ -2029,7 +2027,6 @@ def main():
             cache_entry.update(
                 {
                     "score": final_score,
-                    "raw_score": raw_s1,
                     "raw_score_stage1": raw_s1,
                     "model_id_stage1": s1_model_name,
                     "raw_score_stage2": raw_s2,
@@ -2044,7 +2041,6 @@ def main():
                 {
                     "id": asset_id,
                     "score": final_score,
-                    "raw_score": raw_s1,
                     "reason": reason,
                     "asset": item["asset"],
                 }
