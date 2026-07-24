@@ -111,7 +111,7 @@ DEFAULT_CONCURRENCY = 5
 DEFAULT_DELAY = 4.0  # 4 seconds delay = max 15 RPM for free tier
 DEFAULT_CACHE_FILE = ".immich_aesthetic_cache.json"
 
-STAGE1_AESTHETIC_PROMPT = (
+AESTHETIC_PROMPT = (
     "You are an expert photography judge. Analyze this photo (which features a specific person) "
     "and score its overall aesthetic quality and suitability for a high-quality highlight album.\n\n"
     "IMPORTANT: You are analyzing a low-resolution thumbnail of the photo (512x512 pixels max). "
@@ -586,7 +586,7 @@ def call_gemini_api(
         "contents": [
             {
                 "parts": [
-                    {"text": STAGE1_AESTHETIC_PROMPT},
+                    {"text": AESTHETIC_PROMPT},
                     {"inlineData": {"mimeType": "image/jpeg", "data": image_b64}},
                 ]
             }
@@ -667,7 +667,7 @@ def call_openai_api(api_key, base_url, model_name, image_bytes, max_retries=5, i
 
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    prompt = STAGE1_AESTHETIC_PROMPT
+    prompt = AESTHETIC_PROMPT
 
     payload = {
         "model": model_name,
@@ -868,7 +868,7 @@ def call_gemini_api_stage2(
         "contents": [
             {
                 "parts": [
-                    {"text": STAGE1_AESTHETIC_PROMPT},
+                    {"text": AESTHETIC_PROMPT},
                     {"inlineData": {"mimeType": "image/jpeg", "data": image_b64}},
                 ]
             }
@@ -941,7 +941,7 @@ def call_openai_api_stage2(
 
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    prompt = STAGE1_AESTHETIC_PROMPT
+    prompt = AESTHETIC_PROMPT
 
     payload = {
         "model": model_name,
