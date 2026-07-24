@@ -901,7 +901,8 @@ def call_gemini_api_stage2(
                 text_out = res_json["candidates"][0]["content"]["parts"][0]["text"]
                 data = json.loads(text_out)
                 score = int(data["score"])
-                return float(score)
+                reason = data.get("reason")
+                return {"raw_score": float(score), "reason": reason}
             elif r.status_code == 429:
                 print(
                     f"\n[Gemini API Stage 2] Rate limit hit (429). Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
@@ -985,7 +986,8 @@ def call_openai_api_stage2(
                 text_out = res_json["choices"][0]["message"]["content"]
                 data = json.loads(text_out)
                 score = int(data["score"])
-                return float(score)
+                reason = data.get("reason")
+                return {"raw_score": float(score), "reason": reason}
             else:
                 time.sleep(backoff)
                 backoff *= 2.0
@@ -1074,7 +1076,8 @@ def score_image_stage2(
 
             with torch.no_grad():
                 score = local_stage2_model(temp_path)
-                return float(score.item())
+                val = float(score.item())
+                return {"raw_score": val, "reason": f"Local technical score: {val:.2f}"}
         finally:
             try:
                 os.remove(temp_path)
@@ -1855,6 +1858,8 @@ def main():
                 raw_s2 = cached_entry["raw_score_stage2"]
                 if raw_s2 is not None:
                     item["raw_score_stage2"] = float(raw_s2)
+                    if "reason_stage2" in cached_entry:
+                        item["reason_stage2"] = cached_entry["reason_stage2"]
                     stage2_results.append(item)
                     continue
 
@@ -1901,7 +1906,7 @@ def main():
                             time.sleep(sleep_time)
 
                     # Score using Stage 2 model (like MUSIQ)
-                    raw_s2 = score_image_stage2(
+                    score_res = score_image_stage2(
                         img_bytes,
                         stage2_model,
                         gemini_key=gemini_key,
@@ -1910,6 +1915,8 @@ def main():
                         openai_url=openai_url,
                         openai_model=openai_model,
                     )
+                    raw_s2 = score_res["raw_score"]
+                    reason_s2 = score_res.get("reason")
 
                     # Save to cache
                     cache_entry = cache.get(asset_id, {})
@@ -1917,6 +1924,7 @@ def main():
                         {
                             "raw_score_stage2": raw_s2,
                             "model_id_stage2": stage2_model,
+                            "reason_stage2": reason_s2,
                         }
                     )
                     with cache_lock:
@@ -1926,6 +1934,7 @@ def main():
                         "id": asset_id,
                         "raw_score_stage1": item["raw_score_stage1"],
                         "raw_score_stage2": raw_s2,
+                        "reason_stage2": reason_s2,
                         "status": "success",
                     }
                 except Exception as e:
@@ -1945,6 +1954,7 @@ def main():
                             for c in candidates_for_stage2:
                                 if c["id"] == item_res["id"]:
                                     c["raw_score_stage2"] = item_res["raw_score_stage2"]
+                                    c["reason_stage2"] = item_res.get("reason_stage2")
                                     stage2_results.append(c)
                                     break
                             filename = c["asset"].get("originalFileName") or c["id"]
@@ -2015,6 +2025,7 @@ def main():
 
             # Update cache entry
             cache_entry = cache.get(asset_id, {})
+            reason_s2 = item.get("reason_stage2") or cache_entry.get("reason_stage2")
             cache_entry.update(
                 {
                     "score": final_score,
@@ -2023,6 +2034,7 @@ def main():
                     "model_id_stage1": s1_model_name,
                     "raw_score_stage2": raw_s2,
                     "model_id_stage2": stage2_model if raw_s2 is not None else None,
+                    "reason_stage2": reason_s2,
                     "reason": reason,
                 }
             )
