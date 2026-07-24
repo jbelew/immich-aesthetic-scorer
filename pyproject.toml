@@ -7,6 +7,7 @@ name = "immich-aesthetic-scorer"
 version = "0.1.0"
 description = "Aesthetic scorer for Immich using CLIP or Gemini/OpenAI vision models"
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.9"
 dependencies = [
     "requests",
