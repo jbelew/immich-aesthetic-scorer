@@ -1830,8 +1830,16 @@ def main():
         stage2_top_n = max(1, int(len(stage1_results) * (stage2_top_pct / 100.0)))
 
         # Two-stage path: score top candidates with Stage 2 model, then combine
+        is_local_s2 = not (
+            "gemini" in stage2_model.lower()
+            or "openai" in stage2_model.lower()
+            or "gpt" in stage2_model.lower()
+        )
+        stage2_type_str = (
+            "Technical Re-ranking" if is_local_s2 else "Artistic Curation & Refinement"
+        )
         print(
-            f"\n--- {COLOR_MAGENTA}Stage 2: Technical Re-ranking{COLOR_RESET} (selecting top {stage2_top_n} candidates ({stage2_top_pct}%) using model '{COLOR_BOLD}{stage2_model}{COLOR_RESET}') ---"
+            f"\n--- {COLOR_MAGENTA}Stage 2: {stage2_type_str}{COLOR_RESET} (selecting top {stage2_top_n} candidates ({stage2_top_pct}%) using model '{COLOR_BOLD}{stage2_model}{COLOR_RESET}') ---"
         )
         stage1_results.sort(key=lambda x: x["s1_norm"], reverse=True)
         candidates_for_stage2 = stage1_results[:stage2_top_n]
@@ -1999,7 +2007,8 @@ def main():
         print(f"  - Raw Score Std Dev: {std_s2:.3f}")
 
         # Combine Stage 1 & Stage 2 scores
-        print("Combining Stage 1 (Aesthetic) and Stage 2 (Technical) scores...")
+        stage2_desc = "Technical" if is_local_s2 else "Artistic Curation"
+        print(f"Combining Stage 1 (Aesthetic) and Stage 2 ({stage2_desc}) scores...")
         cache = load_cache(cache_file)
 
         for item in stage1_results:
