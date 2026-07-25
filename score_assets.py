@@ -1670,8 +1670,9 @@ def main():
         print(f"Stage 1 needing scoring: {len(assets_to_score_s1)}")
 
     if assets_to_score_s1:
+        concurrency_s1 = 1 if scorer_type != "local" else concurrency
         print(
-            f"Starting parallel Stage 1 scoring (using {s1_model_str}) with {concurrency} worker threads."
+            f"Starting parallel Stage 1 scoring (using {s1_model_str}) with {concurrency_s1} worker threads."
         )
         if scorer_type != "local":
             print(
@@ -1733,7 +1734,6 @@ def main():
             with cache_lock:
                 cache[key] = val
 
-        concurrency_s1 = 1 if scorer_type != "local" else concurrency
         failed_count_s1 = 0
         try:
             with ThreadPoolExecutor(max_workers=concurrency_s1) as executor:
@@ -1875,8 +1875,14 @@ def main():
             print(f"Stage 2 needing scoring: {len(assets_to_score_s2)}")
 
         if assets_to_score_s2:
+            is_local_s2 = not (
+                "gemini" in stage2_model.lower()
+                or "openai" in stage2_model.lower()
+                or "gpt" in stage2_model.lower()
+            )
+            concurrency_s2 = 1 if not is_local_s2 else concurrency
             print(
-                f"Starting parallel Stage 2 scoring (using model '{stage2_model}') with {concurrency} worker threads."
+                f"Starting parallel Stage 2 scoring (using model '{stage2_model}') with {concurrency_s2} worker threads."
             )
 
             def process_s2_asset(item):
@@ -1939,12 +1945,6 @@ def main():
                 except Exception as e:
                     return {"id": asset_id, "status": "error", "error": str(e)}
 
-            is_local_s2 = not (
-                "gemini" in stage2_model.lower()
-                or "openai" in stage2_model.lower()
-                or "gpt" in stage2_model.lower()
-            )
-            concurrency_s2 = 1 if not is_local_s2 else concurrency
             failed_count_s2 = 0
             try:
                 with ThreadPoolExecutor(max_workers=concurrency_s2) as executor:
