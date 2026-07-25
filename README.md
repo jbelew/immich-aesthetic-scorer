@@ -17,13 +17,13 @@ The project is structured as a two-stage evaluation pipeline to optimize both co
 ```mermaid
 graph TD
     A[Immich Source: Person or Album] --> B[Fetch Assets: GET /search/metadata]
-    B --> C[Stage 1: Aesthetics & Composition]
+    B --> C[Stage 1: Coarse Filtering or Aesthetics Evaluation]
     C -->|Local model, Gemini, or OpenAI| D{Stage 1 Cached?}
     D -->|Yes| E[Retrieve Stage 1 Score]
     D -->|No| F[Download 512px Thumbnail & Score]
     E --> G[Select Top Candidates: stage2_top_pct]
     F --> G
-    G --> H[Stage 2: Local Quality or Remote Aesthetic]
+    G --> H[Stage 2: Technical Quality or Aesthetics Evaluation]
     H -->|Local MUSIQ, Gemini, or OpenAI| I{Stage 2 Cached?}
     I -->|Yes| J[Retrieve Stage 2 Score]
     I -->|No| K[Download Full Preview / 512px Thumbnail & Score]
@@ -39,23 +39,23 @@ For large image sets, scoring every single photo using commercial APIs (like Goo
 
 The most cost-effective and high-quality setup is to use a **Hybrid Two-Stage Configuration**:
 
-1. **Stage 1 (Local Aesthetics Filtering)**: Evaluate your entire library locally for free using the fast, local CLIP-based model (`rsinema/aesthetic-scorer`). This runs 100% offline, costs nothing, and filters out obviously bad compositions, duplicate burst shots, screenshots, or poor crops.
-2. **Stage 2 (Commercial API Verification)**: Configure Stage 2 to use a commercial API (like Gemini `gemini-2.5-flash` or OpenAI `gpt-4o-mini`) and set `stage2_top_pct` to a target percentage (e.g., `10%` to `15%`).
+1. **Stage 1: Coarse Quality Filtering (Local CLIP)**: Evaluate your entire library locally for free using the fast, local CLIP-based model (`rsinema/aesthetic-scorer`). This runs 100% offline and costs nothing. It acts as a coarse filter to remove obviously bad shots, poor exposure, or accidental captures (filtering out ~85% of your photos). Because local CLIP models lack human context, they are *not* suitable for evaluating composition, expressions, or pose.
+2. **Stage 2: Aesthetics Evaluation (Remote LLM)**: Send only the top **10% to 15%** of candidate photos (`stage2_top_pct`) to a commercial API (like Gemini `gemini-2.5-flash` or OpenAI `gpt-4o-mini`). The LLM acts as an expert "photography judge" evaluating framing, composition, pose, and facial expressions (like catching closed eyes or awkward mid-speech faces) to curate the final highlight album.
 
 This hybrid setup ensures that:
-- **90%** of candidate photos are filtered out for free by the local model.
-- Only the top **10%** of candidate photos are sent to commercial vision APIs for advanced aesthetic verification (composition, expression, and overall appeal), minimizing your token usage and billing costs.
+- **90%** of photos are filtered out for free by the local model.
+- Only the top **10%** of candidate photos are sent to commercial APIs for detailed aesthetic and curation evaluation, minimizing your token usage and billing costs.
 
 > [!NOTE]
-> **Model Biases & Limitations**: The default local `rsinema/aesthetic-scorer` model is heavily biased toward single-person portraits. Group photos (such as a sports team lineup, a family gathering, or a musical performance stage shot) will typically receive lower ratings than individual portraits. If you are curating albums that contain mostly group shots or landscapes, consider using a commercial multimodal API (Gemini or OpenAI) for Stage 1 instead of the local scorer.
+> **Model Biases & Limitations**: The default local `rsinema/aesthetic-scorer` model is heavily biased toward single-person portraits. Group photos (such as sports team lineups, family gatherings, or stage performances) will typically receive lower ratings. If you are curating albums containing mostly group shots or landscapes, consider using a commercial multimodal API (Gemini or OpenAI) for Stage 1 instead of the local scorer.
 
 ## Features
 
 - **Interactive Setup**: If no arguments are passed, the script prompts you interactively for URL, API keys, selecting a target (Person or Album), and target highlights album name.
 - **Interactive Person & Album Search**: You can search for people by name using Immich's facial recognition database or list and search existing albums directly from the CLI.
 - **Two-Stage Scoring Pipeline**:
-  - **Stage 1 (Aesthetics & Composition)**: Evaluates the entire library using a fast aesthetic model (`rsinema/aesthetic-scorer` by default) or Gemini/OpenAI APIs.
-  - **Stage 2 (Local Technical Quality or Remote Advanced Aesthetics)**: Filters the top percentage of candidates from Stage 1. Runs local `musiq-spaq` to filter technical defects (noise, motion blur), OR invokes commercial APIs (Gemini/OpenAI) using the aesthetic prompt to perform a deep-dive aesthetic verification.
+  - **Stage 1 (Coarse Quality Filtering or Aesthetics)**: Evaluates the entire library using a fast, free local quality model (`rsinema/aesthetic-scorer` by default) or Gemini/OpenAI APIs.
+  - **Stage 2 (Technical Quality or Aesthetics Evaluation)**: Filters the top percentage of candidates from Stage 1. Runs local `musiq-spaq` to filter technical defects (sharpness, noise, motion blur), OR invokes commercial APIs (Gemini/OpenAI) as a "photography judge" to perform deep-dive aesthetics, expression, and composition verification.
   - **Sigmoid Z-Score Fusion**: Standardizes scores from both stages mathematically to a common scale before performing a weighted combination. Non-candidates in two-stage scoring receive a fallback Stage 2 score of 50.0 (representing the population mean) to prevent score deflation and maintain mathematical continuity.
 - **Model-Aware Smart Cache**: Scores are saved locally in `.immich_aesthetic_cache.json` alongside their model configuration. If you change models, the script automatically invalidates and re-scores only the affected stages/assets, maintaining full backward compatibility.
 - **API Cost Reduction (Client-Side Downscaling)**: For API-based scoring, downscales preview thumbnails to 512px locally. This keeps composition intact while placing requests in the lowest token billing bracket.
