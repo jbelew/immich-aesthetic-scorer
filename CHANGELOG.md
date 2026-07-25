@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v1.1.1 (2026-07-25)
+
+### Bug Fixes
+
+- **cli**: Correct Stage 1 and Stage 2 console print labels to match pipeline roles
+  ([`39cd44b`](https://github.com/jbelew/immich-aesthetic-scorer/commit/39cd44b3d0687a258fafa880f24e0e3c8dd22b39))
+
+- **cli**: Make Stage 2 console header and combine labels dynamic
+  ([`4f6f992`](https://github.com/jbelew/immich-aesthetic-scorer/commit/4f6f9920ff2632372d87c5649ce8dcd209d62484))
+
+- **cli**: Print actual overridden concurrency instead of configured value
+  ([`7a21315`](https://github.com/jbelew/immich-aesthetic-scorer/commit/7a213154d4f35da7ccc13b62d4af0172295b616e))
+
+### Documentation
+
+- Clarify Stage 1 and Stage 2 pipeline stage distinctions in README
+  ([`8186b01`](https://github.com/jbelew/immich-aesthetic-scorer/commit/8186b01b707b1e63851136c84d353a8551ac15ac))
+
+
 ## v1.1.0 (2026-07-24)
 
 ### Bug Fixes
