@@ -1613,8 +1613,11 @@ def main():
         s1_model_str = f"OpenAI API model '{openai_model}'"
         s1_model_name = openai_model
 
+    stage1_type_str = (
+        "Coarse Quality Filtering" if scorer_type == "local" else "Aesthetics Evaluation"
+    )
     print(
-        f"\n--- {COLOR_CYAN}Stage 1: Aesthetics Evaluation{COLOR_RESET} (using {COLOR_BOLD}{s1_model_str}{COLOR_RESET}) ---"
+        f"\n--- {COLOR_CYAN}Stage 1: {stage1_type_str}{COLOR_RESET} (using {COLOR_BOLD}{s1_model_str}{COLOR_RESET}) ---"
     )
 
     # Phase 1: Retrieve/Compute Stage 1 scores for all assets
@@ -1835,9 +1838,7 @@ def main():
             or "openai" in stage2_model.lower()
             or "gpt" in stage2_model.lower()
         )
-        stage2_type_str = (
-            "Technical Re-ranking" if is_local_s2 else "Artistic Curation & Refinement"
-        )
+        stage2_type_str = "Technical Quality Evaluation" if is_local_s2 else "Aesthetics Evaluation"
         print(
             f"\n--- {COLOR_MAGENTA}Stage 2: {stage2_type_str}{COLOR_RESET} (selecting top {stage2_top_n} candidates ({stage2_top_pct}%) using model '{COLOR_BOLD}{stage2_model}{COLOR_RESET}') ---"
         )
@@ -2007,8 +2008,9 @@ def main():
         print(f"  - Raw Score Std Dev: {std_s2:.3f}")
 
         # Combine Stage 1 & Stage 2 scores
-        stage2_desc = "Technical" if is_local_s2 else "Artistic Curation"
-        print(f"Combining Stage 1 (Aesthetic) and Stage 2 ({stage2_desc}) scores...")
+        stage1_desc = "Technical Quality" if scorer_type == "local" else "Aesthetic"
+        stage2_desc = "Technical Quality" if is_local_s2 else "Aesthetic"
+        print(f"Combining Stage 1 ({stage1_desc}) and Stage 2 ({stage2_desc}) scores...")
         cache = load_cache(cache_file)
 
         for item in stage1_results:
