@@ -51,7 +51,7 @@ The most cost-effective and high-quality setup is to use a **Hybrid Two-Stage Co
 2. **Stage 2: Aesthetics Evaluation (Remote LLM)**: Send only the top **10% to 15%** of candidate photos (`stage2_top_pct`) to a commercial API (like Gemini `gemini-2.5-flash` or OpenAI `gpt-4o-mini`). The LLM acts as an expert "photography judge" evaluating framing, composition, pose, and facial expressions (like catching closed eyes or awkward mid-speech faces) to curate the final highlight album.
 
 This hybrid setup ensures that:
-- **95%** of photos are filtered out for free by the local model.
+- **85%** of photos are filtered out for free by the local model.
 - Only the top **15%** of candidate photos are sent to commercial APIs for detailed aesthetic and curation evaluation, minimizing your token usage and billing costs.
 
 > [!NOTE]
