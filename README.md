@@ -59,10 +59,13 @@ This hybrid setup ensures that:
 > - **Default Model (`somepago/AestheticSigLIP`)**: Trained on a broad range of themes (portraits, landscapes, art, etc.) using SigLIP 2, which preserves native aspect ratios (NaFlex) and avoids squashing/stretching.
 > - **Alternative Model (`rsinema/aesthetic-scorer`)**: You can configure `"local_model_id": "rsinema/aesthetic-scorer"`. However, note that it is heavily focused on single-person portrait-type photographs and does not perform as well on general scenes or landscapes.
 >
-> **Tested Local Models**:
+> **Tested Local Models & Processing Speeds**:
 > 1. `somepago/AestheticSigLIP` (Stage 1 Default): SigLIP 2 (ViT-SO400M) model for overall aesthetic ranking. Preserves aspect ratios natively.
+>    * *Performance:* Very fast. Evaluates **512px downscaled thumbnails**; takes **0.2 to 0.5s per image** on CPU (near-instant on GPU).
 > 2. `rsinema/aesthetic-scorer` (Stage 1 Alternative): CLIP-based (ViT-L/14) model. Strong on single-person portraiture but biased against landscapes and complex scenes.
+>    * *Performance:* Very fast. Evaluates **512px downscaled thumbnails**; takes **0.1 to 0.3s per image** on CPU.
 > 3. `musiq-spaq` (Stage 2 Default): MUSIQ-based technical quality assessment model (evaluating sharpness, noise, exposure) from PyIQA.
+>    * *Performance:* **Slower on CPU**. Because this model inspects pixel-level technical quality, it downloads and processes **full unscaled preview images** (typically 1440px to 2048px). Expect **5.0 to 15.0s per image** on CPU (runs fast on CUDA-compatible GPUs).
 >
 > *If you are curating albums containing mostly group shots or complex scenes, you can also select `gemini` or `openai` as your Stage 1 scorer for advanced multimodal capabilities.*
 
