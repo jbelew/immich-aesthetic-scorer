@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-07-26)
+
+### Features
+
+- **local**: Integrate Aesthetic-SigLIP model and enforce std dev floor
+  ([`6ab679f`](https://github.com/jbelew/immich-aesthetic-scorer/commit/6ab679f69529e9eef127e871243904ce38737626))
+
+
 ## v1.1.1 (2026-07-25)
 
 ### Bug Fixes
