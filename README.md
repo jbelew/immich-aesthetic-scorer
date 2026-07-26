@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/jbelew/immich-aesthetic-scorer/actions/workflows/ci.yml/badge.svg)](https://github.com/jbelew/immich-aesthetic-scorer/actions/workflows/ci.yml)
 
-This tool automates finding the best images of a specific person or album in an **Immich** photo library. It downloads the images, scores them using **Google Gemini**, an **OpenAI-compatible provider** (like OpenAI, Groq, OpenRouter, or local Ollama), or a **local CLIP-based machine learning model**, and adds the top 100 images (or a custom amount) into a new or existing highlight album.
+This tool automates finding the best images of a specific person or album in an **Immich** photo library. It downloads the images, scores them using **Google Gemini**, an **OpenAI-compatible provider** (like OpenAI, Groq, OpenRouter, or local Ollama), or a **local SigLIP/CLIP-based machine learning model**, and adds the top 100 images (or a custom amount) into a new or existing highlight album.
 
 ## Why Did I Build This?
 
@@ -84,7 +84,7 @@ This hybrid setup ensures that:
    ```
 
 3. **Install Local Model Dependencies (Optional)**:
-   If you wish to run evaluation models locally and offline (such as the default CLIP aesthetic scorer or the Stage 2 MUSIQ sharpness scorer):
+   If you wish to run evaluation models locally and offline (such as the default SigLIP aesthetic scorer or the Stage 2 MUSIQ sharpness scorer):
    ```bash
    pip install -r requirements-ml.txt
    ```
