@@ -25,10 +25,10 @@ graph TD
     F --> H
 
     H -->|Yes| I[Select Top Candidates: stage2_top_pct]
-    I --> J[Stage 2: Remote LLM/VLM Aesthetics Evaluation (Recommended) or Local Technical Quality]
+    I --> J["Stage 2: Remote LLM/VLM Aesthetics Evaluation (Recommended) or Local Technical Quality"]
     J --> K{Stage 2 Cached?}
     K -->|Yes| L[Retrieve Cached Stage 2 Score]
-    K -->|No| M[Download 512px Thumbnail (Remote) or Full Preview (Local) & Evaluate]
+    K -->|No| M["Download 512px Thumbnail (Remote) or Full Preview (Local) & Evaluate"]
     L --> N[Z-Score Sigmoid Fusion & Deduplication]
     M --> N
 
