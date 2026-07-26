@@ -19,7 +19,7 @@ repos:
         args: [ --fix ]
 
   - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.368
+    rev: v1.1.411
     hooks:
       - id: pyright
         # Ensure it works when run in virtual env
