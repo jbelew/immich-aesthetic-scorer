@@ -39,7 +39,7 @@ For large image sets, scoring every single photo using commercial APIs (like Goo
 
 The most cost-effective and high-quality setup is to use a **Hybrid Two-Stage Configuration**:
 
-1. **Stage 1: Coarse Quality Filtering (Local CLIP)**: Evaluate your entire library locally for free using the fast, local CLIP-based model (`rsinema/aesthetic-scorer`). This runs 100% offline and costs nothing. It acts as a coarse filter to remove obviously bad shots, poor exposure, or accidental captures (filtering out ~85% of your photos). Because local CLIP models lack human context, they are *not* suitable for evaluating composition, expressions, or pose.
+1. **Stage 1: Coarse Quality Filtering (Local SigLIP)**: Evaluate your entire library locally for free using the fast, local SigLIP-based model (`somepago/AestheticSigLIP`). This runs 100% offline and costs nothing. It acts as a coarse filter to remove obviously bad shots, poor exposure, or accidental captures (filtering out ~85% of your photos). Because local vision models lack human context, they are *not* suitable for evaluating composition, expressions, or pose.
 2. **Stage 2: Aesthetics Evaluation (Remote LLM)**: Send only the top **10% to 15%** of candidate photos (`stage2_top_pct`) to a commercial API (like Gemini `gemini-2.5-flash` or OpenAI `gpt-4o-mini`). The LLM acts as an expert "photography judge" evaluating framing, composition, pose, and facial expressions (like catching closed eyes or awkward mid-speech faces) to curate the final highlight album.
 
 This hybrid setup ensures that:
@@ -47,14 +47,18 @@ This hybrid setup ensures that:
 - Only the top **10%** of candidate photos are sent to commercial APIs for detailed aesthetic and curation evaluation, minimizing your token usage and billing costs.
 
 > [!NOTE]
-> **Model Biases & Limitations**: The default local `rsinema/aesthetic-scorer` model is heavily biased toward single-person portraits. Group photos (such as sports team lineups, family gatherings, or stage performances) will typically receive lower ratings. If you are curating albums containing mostly group shots or landscapes, consider using a commercial multimodal API (Gemini or OpenAI) for Stage 1 instead of the local scorer.
+> **Model Selection & Limitations**:
+> - **Default Model (`somepago/AestheticSigLIP`)**: Trained on a broad range of themes (portraits, landscapes, art, etc.) using SigLIP 2, which preserves native aspect ratios (NaFlex) and avoids squashing/stretching.
+> - **Alternative Model (`rsinema/aesthetic-scorer`)**: You can configure `"local_model_id": "rsinema/aesthetic-scorer"`. However, note that it is heavily focused on single-person portrait-type photographs and does not perform as well on general scenes or landscapes.
+>
+> *If you are curating albums containing mostly group shots or complex scenes, you can also select `gemini` or `openai` as your Stage 1 scorer for advanced multimodal capabilities.*
 
 ## Features
 
 - **Interactive Setup**: If no arguments are passed, the script prompts you interactively for URL, API keys, selecting a target (Person or Album), and target highlights album name.
 - **Interactive Person & Album Search**: You can search for people by name using Immich's facial recognition database or list and search existing albums directly from the CLI.
 - **Two-Stage Scoring Pipeline**:
-  - **Stage 1 (Coarse Quality Filtering or Aesthetics)**: Evaluates the entire library using a fast, free local quality model (`rsinema/aesthetic-scorer` by default) or Gemini/OpenAI APIs.
+  - **Stage 1 (Coarse Quality Filtering or Aesthetics)**: Evaluates the entire library using a fast, free local quality model (`somepago/AestheticSigLIP` by default) or Gemini/OpenAI APIs.
   - **Stage 2 (Technical Quality or Aesthetics Evaluation)**: Filters the top percentage of candidates from Stage 1. Runs local `musiq-spaq` to filter technical defects (sharpness, noise, motion blur), OR invokes commercial APIs (Gemini/OpenAI) as a "photography judge" to perform deep-dive aesthetics, expression, and composition verification.
   - **Sigmoid Z-Score Fusion**: Standardizes scores from both stages mathematically to a common scale before performing a weighted combination. Non-candidates in two-stage scoring receive a fallback Stage 2 score of 50.0 (representing the population mean) to prevent score deflation and maintain mathematical continuity.
 - **Model-Aware Smart Cache**: Scores are saved locally in `.immich_aesthetic_cache.json` alongside their model configuration. If you change models, the script automatically invalidates and re-scores only the affected stages/assets, maintaining full backward compatibility.
@@ -119,7 +123,7 @@ See [config.json.example](./config.json.example) for a complete template file.
   "concurrency": 15,
   "cache_file": ".immich_aesthetic_cache.json",
   "scorer_type": "local",
-  "local_model_id": "rsinema/aesthetic-scorer",
+  "local_model_id": "somepago/AestheticSigLIP",
   "write_ratings": true,
   "dedup_window": 120,
   "two_stage": true,
@@ -140,7 +144,7 @@ See [config.json.example](./config.json.example) for a complete template file.
   "concurrency": 15,
   "cache_file": ".immich_aesthetic_cache.json",
   "scorer_type": "local",
-  "local_model_id": "rsinema/aesthetic-scorer",
+  "local_model_id": "somepago/AestheticSigLIP",
   "write_ratings": true,
   "dedup_window": 120,
   "two_stage": false
@@ -184,7 +188,7 @@ If critical parameters (like Immich Server URL and API Key) are missing from the
 | `--openai-key` | OpenAI API Key (or for compatible providers) | Prompt / Environment |
 | `--openai-url` | Base URL for OpenAI-compatible provider | `https://api.openai.com/v1` |
 | `--openai-model`| Model ID for OpenAI-compatible provider | `gpt-4o-mini` |
-| `--local-model` | Hugging Face model ID for local scoring | `rsinema/aesthetic-scorer` |
+| `--local-model` | Hugging Face model ID for local scoring | `somepago/AestheticSigLIP` |
 | `--write-ratings`| Sync star ratings (1-5) to Immich metadata | Off |
 | `--target-album-name`| Name of the target highlights album | `Best of <Person Name>` or `Best of Album <Album Name>` |
 | `--limit` | Maximum number of top-rated photos to add | `100` |

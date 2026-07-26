@@ -10,7 +10,7 @@
   "delay": 0.0,
   "cache_file": ".immich_aesthetic_cache.json",
   "scorer_type": "local",
-  "local_model_id": "rsinema/aesthetic-scorer",
+  "local_model_id": "somepago/AestheticSigLIP",
   "write_ratings": true,
   "dedup_window": 120,
   "two_stage": true,

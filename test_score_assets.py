@@ -2,10 +2,14 @@ import math
 import os
 import tempfile
 import unittest
+import warnings
 from unittest.mock import MagicMock, patch
 
+# Silence PyTorch UserWarnings during testing
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+
 # Import functions from score_assets
-from score_assets import (
+from score_assets import (  # noqa: E402
     check_immich_connection,
     fetch_all_image_assets,
     get_album_details,
@@ -258,6 +262,81 @@ class TestImmichScorer(unittest.TestCase):
         self.assertEqual(len(deduped), 2)
         self.assertEqual(deduped[0]["id"], "a2")
         self.assertEqual(deduped[1]["id"], "a4")
+
+    @patch("huggingface_hub.hf_hub_download")
+    @patch("score_assets.torch")
+    @patch("score_assets.CLIPProcessor")
+    @patch("score_assets.RsinemaAestheticScorer")
+    @patch("score_assets.Image.open")
+    def test_score_image_local_rsinema(
+        self, mock_image_open, mock_scorer_class, mock_processor_class, mock_torch, mock_hf_download
+    ):
+        # Reset local model states to ensure clean test environment
+        import score_assets
+
+        score_assets.local_model = None
+        score_assets.local_processor = None
+
+        # Setup mocks
+        mock_hf_download.return_value = "/fake/path/model.pt"
+
+        mock_model = MagicMock()
+        import torch
+
+        mock_output = torch.tensor([4.5, 3.0, 2.0, 1.0, 0.5, 0.2, 0.1])
+        mock_model.return_value = mock_output
+        mock_scorer_class.return_value = mock_model
+
+        mock_processor = MagicMock()
+        mock_processor.return_value = {"pixel_values": torch.zeros(1, 3, 224, 224)}
+        mock_processor_class.from_pretrained.return_value = mock_processor
+
+        mock_image = MagicMock()
+        mock_image.mode = "RGB"
+        mock_image_open.return_value = mock_image
+
+        # Run score_image_local
+        res = score_assets.score_image_local(b"fake_image_bytes", "rsinema/aesthetic-scorer")
+
+        # Verify results
+        self.assertIsNotNone(res)
+        self.assertEqual(res["raw_score"], 9.0)  # 4.5 * 2.0
+        self.assertEqual(res["score"], 90)
+        self.assertIn("Local CLIP score: 9.00/10.0", res["reason"])
+
+    @patch("huggingface_hub.snapshot_download")
+    @patch("score_assets.Image.open")
+    @patch("sys.path")
+    def test_score_image_local_siglip(self, mock_sys_path, mock_image_open, mock_snapshot_download):
+        import score_assets
+
+        score_assets.local_model = None
+        score_assets.local_processor = None
+
+        # Setup mocks
+        mock_snapshot_download.return_value = "/fake/path/siglip"
+
+        mock_scorer = MagicMock()
+        mock_scorer.rate.return_value = 7.52
+
+        mock_scorer_class = MagicMock()
+        mock_scorer_class.from_local.return_value = mock_scorer
+
+        mock_predict = MagicMock()
+        mock_predict.AestheticScorer = mock_scorer_class
+
+        mock_image = MagicMock()
+        mock_image.mode = "RGB"
+        mock_image_open.return_value = mock_image
+
+        with patch.dict("sys.modules", {"predict": mock_predict}):
+            res = score_assets.score_image_local(b"fake_image_bytes", "somepago/AestheticSigLIP")
+
+        # Verify results
+        self.assertIsNotNone(res)
+        self.assertEqual(res["raw_score"], 7.52)
+        self.assertEqual(res["score"], 75)
+        self.assertIn("Local CLIP score: 7.52/10.0", res["reason"])
 
 
 if __name__ == "__main__":

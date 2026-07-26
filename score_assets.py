@@ -23,8 +23,9 @@ from typing import Any, Optional
 import requests
 from tqdm import tqdm
 
-# Disable CUDA globally to prevent PyTorch initialization warnings on systems with unsupported GPU hardware
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# Comment out global CUDA disable to allow users with compatible GPUs (compute capability >= 7.0) to use GPU acceleration.
+# Older/unsupported GPUs will gracefully fall back to CPU via device check logic in score_image_local.
+# os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 # Suppress Hugging Face hub telemetry/symlinks warnings and other log noises
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -32,11 +33,10 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 
-# Silence optional libraries warnings (like unauthenticated requests) using the warnings filter
-
-
+# Silence optional libraries and PyTorch CUDA warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
 # Set up logging levels to silence verbose warnings/report tables from Hugging Face & Transformers
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
@@ -772,6 +772,20 @@ def score_image_local(image_bytes, model_id):
                 local_model.to(device)
                 local_model.eval()
                 local_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            elif "aestheticsiglip" in model_id.lower() or "siglip" in model_id.lower():
+                import sys
+
+                from huggingface_hub import snapshot_download
+
+                model_dir = snapshot_download(repo_id=model_id)
+                if model_dir not in sys.path:
+                    sys.path.insert(0, model_dir)
+
+                from predict import AestheticScorer  # type: ignore
+
+                local_model = AestheticScorer.from_local(
+                    os.path.join(model_dir, "best.pt"), device=device
+                )
             else:
                 try:
                     from aesthetics_predictor import (
@@ -806,26 +820,30 @@ def score_image_local(image_bytes, model_id):
             if image.mode != "RGB":
                 image = image.convert("RGB")
 
-            assert local_processor is not None, "Local processor is not initialized"
-            assert local_model is not None, "Local model is not initialized"
-
-            inputs = local_processor(images=image, return_tensors="pt")
-
-            if model_id == "rsinema/aesthetic-scorer":
-                pixel_values = inputs["pixel_values"].to(device)
-                with torch.no_grad():
-                    outputs = local_model(pixel_values)
-                    # Extract Overall score (first dimension of output) and scale 0-5 -> 0-10
-                    if len(outputs.shape) > 1:
-                        raw_score = outputs[0][0].item()
-                    else:
-                        raw_score = outputs[0].item()
-                    raw_score = raw_score * 2.0
+            if "aestheticsiglip" in model_id.lower() or "siglip" in model_id.lower():
+                assert local_model is not None, "Local model is not initialized"
+                raw_score = local_model.rate(image)
             else:
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    outputs = local_model(**inputs)
-                    raw_score = outputs.logits.item()
+                assert local_processor is not None, "Local processor is not initialized"
+                assert local_model is not None, "Local model is not initialized"
+
+                inputs = local_processor(images=image, return_tensors="pt")
+
+                if model_id == "rsinema/aesthetic-scorer":
+                    pixel_values = inputs["pixel_values"].to(device)
+                    with torch.no_grad():
+                        outputs = local_model(pixel_values)
+                        # Extract Overall score (first dimension of output) and scale 0-5 -> 0-10
+                        if len(outputs.shape) > 1:
+                            raw_score = outputs[0][0].item()
+                        else:
+                            raw_score = outputs[0].item()
+                        raw_score = raw_score * 2.0
+                else:
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        outputs = local_model(**inputs)
+                        raw_score = outputs.logits.item()
 
             # Scale to 0-100 using temporary linear math.
             # Scores will be dynamically calibrated at the end of the run
@@ -1773,8 +1791,8 @@ def main():
         mean_s1 = sum(raw_s1_list) / len(raw_s1_list)
         variance_s1 = sum((x - mean_s1) ** 2 for x in raw_s1_list) / len(raw_s1_list)
         std_s1 = math.sqrt(variance_s1)
-        if std_s1 < 0.01:
-            std_s1 = 0.6
+        if std_s1 < 1.0:
+            std_s1 = 1.0
     else:
         mean_s1 = 6.0
         std_s1 = 1.0
