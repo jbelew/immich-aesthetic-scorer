@@ -1236,14 +1236,13 @@ def parse_asset_time(asset_item):
     if not time_str:
         return datetime.min
     try:
-        cleaned_str = time_str.replace("Z", "")
-        if "." in cleaned_str:
-            base_part, ms_part = cleaned_str.split(".", 1)
-            ms_part = (ms_part + "000000")[:6]
-            cleaned_str = f"{base_part}.{ms_part}"
-            return datetime.strptime(cleaned_str, "%Y-%m-%dT%H:%M:%S.%f")
-        else:
-            return datetime.strptime(cleaned_str, "%Y-%m-%dT%H:%M:%S")
+        # Standardize 'Z' to '+00:00' to support all python fromisoformat versions
+        cleaned_str = time_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned_str)
+        # Strip timezone awareness to allow safe subtraction and comparisons with naive datetimes
+        if dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt
     except Exception:
         return datetime.min
 
@@ -1251,8 +1250,8 @@ def parse_asset_time(asset_item):
 def deduplicate_bursts(scored_assets, dedup_window):
     """Filters out burst photos captured within a specific time window.
 
-    Sorts the assets chronologically, groups them into time-based clusters,
-    and preserves only the highest scoring asset from each cluster.
+    Sorts the assets chronologically, groups them into time-based clusters using a
+    sliding/rolling window, and preserves only the highest scoring asset from each cluster.
     """
     if dedup_window <= 0 or not scored_assets:
         return scored_assets
@@ -1275,7 +1274,8 @@ def deduplicate_bursts(scored_assets, dedup_window):
         if not current_group:
             current_group.append((dt, item))
         else:
-            diff = (dt - current_group[0][0]).total_seconds()
+            # Sliding window: compare with the most recent item in the current group
+            diff = (dt - current_group[-1][0]).total_seconds()
             if diff <= dedup_window:
                 current_group.append((dt, item))
             else:

@@ -263,6 +263,22 @@ class TestImmichScorer(unittest.TestCase):
         self.assertEqual(deduped[0]["id"], "a2")
         self.assertEqual(deduped[1]["id"], "a4")
 
+        # Case 3: Sliding window test
+        # a1 (10:00:00)
+        # a2 (10:00:05) -> 5s from a1 (in group)
+        # a3 (10:00:08) -> 3s from a2 (in group)
+        # a4 (10:00:15) -> 7s from a3 (in group, since gap is <= 10s, even though it is 15s from a1)
+        # Group 1 should contain [a1, a2, a3, a4], and max score is a2 (90)
+        scored_assets_case3 = scored_assets.copy()
+        scored_assets_case3[3] = {
+            "id": "a4",
+            "score": 70,
+            "asset": {"localDateTime": "2026-07-24T10:00:15"},
+        }
+        deduped_case3 = deduplicate_bursts(scored_assets_case3, 10)
+        self.assertEqual(len(deduped_case3), 1)
+        self.assertEqual(deduped_case3[0]["id"], "a2")
+
     @patch("huggingface_hub.hf_hub_download")
     @patch("score_assets.torch")
     @patch("score_assets.CLIPProcessor")
