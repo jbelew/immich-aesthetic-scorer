@@ -10,21 +10,29 @@ The project is structured as a two-stage evaluation pipeline to optimize both co
 
 ```mermaid
 graph TD
-    A[Immich Source: Person or Album] --> B[Fetch Assets: GET /search/metadata]
-    B --> C[Stage 1: Aesthetics & Composition]
-    C -->|Local model, Gemini, or OpenAI| D{Stage 1 Cached?}
-    D -->|Yes| E[Retrieve Stage 1 Score]
-    D -->|No| F[Download 512px Thumbnail & Score]
-    E --> G[Select Top Candidates: stage2_top_pct]
-    F --> G
-    G --> H[Stage 2: Local Quality or Remote Aesthetic]
-    H -->|Local MUSIQ, Gemini, or OpenAI| I{Stage 2 Cached?}
-    I -->|Yes| J[Retrieve Stage 2 Score]
-    I -->|No| K[Download Full Preview / 512px Thumbnail & Score]
-    J --> L[Z-Score Sigmoid Fusion & Deduplication]
-    K --> L
-    L --> M[Star Rating Sync: native metadata update]
-    L --> N[Compile Highlights Target Album]
+    A[Immich Source: Person or Album] --> B[Fetch Assets: POST /search/metadata]
+    B --> C[Stage 1: Coarse Quality/Aesthetic Evaluation]
+    C --> D{Stage 1 Cached?}
+    D -->|Yes| E[Retrieve Cached Stage 1 Score]
+    D -->|No| F[Download 512px Thumbnail & Evaluate]
+    E --> H{Two-Stage Enabled?}
+    F --> H
+
+    H -->|Yes| I[Select Top Candidates: stage2_top_pct]
+    I --> J["Stage 2: Remote LLM/VLM Aesthetics Evaluation (Recommended) or Local Technical Quality"]
+    J --> K{Stage 2 Cached?}
+    K -->|Yes| L[Retrieve Cached Stage 2 Score]
+    K -->|No| M["Download 512px Thumbnail (Remote) or Full Preview (Local) & Evaluate"]
+    L --> N[Z-Score Sigmoid Fusion & Deduplication]
+    M --> N
+
+    H -->|No| O[Score Standardization & Deduplication]
+
+    N --> P[Select Top Highlights: limit]
+    O --> P
+
+    P --> Q[Star Rating Sync: native metadata update]
+    P --> R[Compile Highlights Target Album]
 ```
 
 ---
@@ -43,7 +51,7 @@ $$z = \frac{x - \mu}{\sigma}$$
 Where:
 - $x$ is the raw score.
 - $\mu$ is the mean of raw scores in the evaluated set.
-- $\sigma$ is the standard deviation.
+- $\sigma$ is the standard deviation (calibrated with a **minimum floor of 1.0** for Stage 1 to prevent narrow raw score distributions from over-exaggerating tiny z-score variations).
 
 To combine normalized scores into a 0-100 target range, the Z-scores are mapped using a **logistic sigmoid function**:
 
@@ -67,7 +75,7 @@ The cached data is saved in `.immich_aesthetic_cache.json` under individual asse
 {
   "asset-uuid": {
     "raw_score_stage1": 6.55,
-    "model_id_stage1": "rsinema/aesthetic-scorer",
+    "model_id_stage1": "somepago/AestheticSigLIP",
     "raw_score_stage2": 55.41,
     "model_id_stage2": "musiq-spaq",
     "updatedAt": "2026-07-23T13:30:00.000Z"
@@ -88,5 +96,5 @@ If you change models in `config.json`, the script validates the configuration mo
 
 If you are expanding this project, consider the following additions:
 1. **Dynamic Batching**: For local scoring (Stage 1 or Stage 2), batching images before executing inference on GPU would yield 5x-10x throughput speedups.
-2. **Additional Local Backbones**: Support for newer lightweight vision models (e.g. MobileNetV4, SigLIP) to run Stage 1 aesthetics evaluation even faster on low-resource hardware.
+2. **Additional Local Backbones**: Support for other lightweight vision models (e.g., MobileNetV4, custom fine-tuned ViTs) to run Stage 1 aesthetics evaluation on alternative classification tasks.
 3. **Pre-commit Automation**: Run `python -m unittest test_score_assets.py` automatically before each commit to maintain test suite coverage.
