@@ -8,6 +8,16 @@ from unittest.mock import MagicMock, patch
 # Silence PyTorch UserWarnings during testing
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
+# Check if optional ML dependencies are available (skipped in CI environment)
+try:
+    import huggingface_hub  # noqa: F401
+    import torch  # noqa: F401
+    import transformers  # noqa: F401
+
+    HAS_ML = True
+except ImportError:
+    HAS_ML = False
+
 # Import functions from score_assets
 from score_assets import (  # noqa: E402
     check_immich_connection,
@@ -279,6 +289,7 @@ class TestImmichScorer(unittest.TestCase):
         self.assertEqual(len(deduped_case3), 1)
         self.assertEqual(deduped_case3[0]["id"], "a2")
 
+    @unittest.skipIf(not HAS_ML, "ML dependencies not installed")
     @patch("huggingface_hub.hf_hub_download")
     @patch("score_assets.torch")
     @patch("score_assets.CLIPProcessor")
@@ -320,6 +331,7 @@ class TestImmichScorer(unittest.TestCase):
         self.assertEqual(res["score"], 90)
         self.assertIn("Local CLIP score: 9.00/10.0", res["reason"])
 
+    @unittest.skipIf(not HAS_ML, "ML dependencies not installed")
     @patch("huggingface_hub.snapshot_download")
     @patch("score_assets.Image.open")
     @patch("sys.path")
