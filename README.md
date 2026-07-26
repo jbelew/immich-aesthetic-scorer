@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/jbelew/immich-aesthetic-scorer/actions/workflows/ci.yml/badge.svg)](https://github.com/jbelew/immich-aesthetic-scorer/actions/workflows/ci.yml)
 
-This tool automates finding the best images of a specific person or album in an **Immich** photo library. It downloads the images, scores them using **Google Gemini**, an **OpenAI-compatible provider** (like OpenAI, Groq, OpenRouter, or local Ollama), or a **local SigLIP/CLIP-based machine learning model**, and adds the top 100 images (or a custom amount) into a new or existing highlight album.
+This tool automates finding the best images of a specific person or album in an **Immich** photo library. It downloads the images, scores them using **Google Gemini**, an **OpenAI-compatible provider** (like OpenAI, Groq, OpenRouter, or local Ollama), or a **local SigLIP/CLIP-based machine learning model**, and adds the top images into a new or existing highlight album.
 
 ## Why Did I Build This?
 
@@ -16,21 +16,29 @@ The project is structured as a two-stage evaluation pipeline to optimize both co
 
 ```mermaid
 graph TD
-    A[Immich Source: Person or Album] --> B[Fetch Assets: GET /search/metadata]
-    B --> C[Stage 1: Coarse Filtering or Aesthetics Evaluation]
-    C -->|Local model, Gemini, or OpenAI| D{Stage 1 Cached?}
-    D -->|Yes| E[Retrieve Stage 1 Score]
-    D -->|No| F[Download 512px Thumbnail & Score]
-    E --> G[Select Top Candidates: stage2_top_pct]
-    F --> G
-    G --> H[Stage 2: Technical Quality or Aesthetics Evaluation]
-    H -->|Local MUSIQ, Gemini, or OpenAI| I{Stage 2 Cached?}
-    I -->|Yes| J[Retrieve Stage 2 Score]
-    I -->|No| K[Download Full Preview / 512px Thumbnail & Score]
-    J --> L[Z-Score Sigmoid Fusion & Deduplication]
-    K --> L
-    L --> M[Star Rating Sync: native metadata update]
-    L --> N[Compile Highlights Target Album]
+    A[Immich Source: Person or Album] --> B[Fetch Assets: POST /search/metadata]
+    B --> C[Stage 1: Coarse Quality/Aesthetic Evaluation]
+    C --> D{Stage 1 Cached?}
+    D -->|Yes| E[Retrieve Cached Stage 1 Score]
+    D -->|No| F[Download 512px Thumbnail & Evaluate]
+    E --> H{Two-Stage Enabled?}
+    F --> H
+
+    H -->|Yes| I[Select Top Candidates: stage2_top_pct]
+    I --> J[Stage 2: Technical Quality or Aesthetics Evaluation]
+    J --> K{Stage 2 Cached?}
+    K -->|Yes| L[Retrieve Cached Stage 2 Score]
+    K -->|No| M[Download Full Preview or 512px Thumbnail & Evaluate]
+    L --> N[Z-Score Sigmoid Fusion & Deduplication]
+    M --> N
+
+    H -->|No| O[Score Standardization & Deduplication]
+
+    N --> P[Select Top Highlights: limit]
+    O --> P
+
+    P --> Q[Star Rating Sync: native metadata update]
+    P --> R[Compile Highlights Target Album]
 ```
 
 ## Recommended Workflow (Cost & Quality Optimization)
