@@ -25,7 +25,7 @@ graph TD
     F --> H
 
     H -->|Yes| I[Select Top Candidates: stage2_top_pct]
-    I --> J["Stage 2: Remote LLM/VLM Aesthetics Evaluation (Recommended) or Local Technical Quality"]
+    I --> J["Stage 2: Remote LLM/VLM Aesthetics Evaluation"]
     J --> K{Stage 2 Cached?}
     K -->|Yes| L[Retrieve Cached Stage 2 Score]
     K -->|No| M["Download 512px Thumbnail (Remote) or Full Preview (Local) & Evaluate"]
@@ -47,17 +47,22 @@ For large image sets, scoring every single photo using commercial APIs (like Goo
 
 The most cost-effective and high-quality setup is to use a **Hybrid Two-Stage Configuration**:
 
-1. **Stage 1: Coarse Quality Filtering (Local SigLIP)**: Evaluate your entire library locally for free using the fast, local SigLIP-based model (`somepago/AestheticSigLIP`). This runs 100% offline and costs nothing. It acts as a coarse filter to remove obviously bad shots, poor exposure, or accidental captures (filtering out ~85% of your photos). Because local vision models lack human context, they are *not* suitable for evaluating composition, expressions, or pose.
+1. **Stage 1: Coarse Quality Filtering (Local SigLIP)**: Evaluate your entire library locally for free using the fast, local SigLIP-based model (`somepago/AestheticSigLIP`). This runs 100% offline and costs nothing. It acts as a coarse filter to remove obviously bad shots, poor exposure, or accidental captures (filtering out ~85% of your photos).
 2. **Stage 2: Aesthetics Evaluation (Remote LLM)**: Send only the top **10% to 15%** of candidate photos (`stage2_top_pct`) to a commercial API (like Gemini `gemini-2.5-flash` or OpenAI `gpt-4o-mini`). The LLM acts as an expert "photography judge" evaluating framing, composition, pose, and facial expressions (like catching closed eyes or awkward mid-speech faces) to curate the final highlight album.
 
 This hybrid setup ensures that:
-- **90%** of photos are filtered out for free by the local model.
-- Only the top **10%** of candidate photos are sent to commercial APIs for detailed aesthetic and curation evaluation, minimizing your token usage and billing costs.
+- **95%** of photos are filtered out for free by the local model.
+- Only the top **15%** of candidate photos are sent to commercial APIs for detailed aesthetic and curation evaluation, minimizing your token usage and billing costs.
 
 > [!NOTE]
 > **Model Selection & Limitations**:
 > - **Default Model (`somepago/AestheticSigLIP`)**: Trained on a broad range of themes (portraits, landscapes, art, etc.) using SigLIP 2, which preserves native aspect ratios (NaFlex) and avoids squashing/stretching.
 > - **Alternative Model (`rsinema/aesthetic-scorer`)**: You can configure `"local_model_id": "rsinema/aesthetic-scorer"`. However, note that it is heavily focused on single-person portrait-type photographs and does not perform as well on general scenes or landscapes.
+>
+> **Tested Local Models**:
+> 1. `somepago/AestheticSigLIP` (Stage 1 Default): SigLIP 2 (ViT-SO400M) model for overall aesthetic ranking. Preserves aspect ratios natively.
+> 2. `rsinema/aesthetic-scorer` (Stage 1 Alternative): CLIP-based (ViT-L/14) model. Strong on single-person portraiture but biased against landscapes and complex scenes.
+> 3. `musiq-spaq` (Stage 2 Default): MUSIQ-based technical quality assessment model (evaluating sharpness, noise, exposure) from PyIQA.
 >
 > *If you are curating albums containing mostly group shots or complex scenes, you can also select `gemini` or `openai` as your Stage 1 scorer for advanced multimodal capabilities.*
 
