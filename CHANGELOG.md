@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.1 (2026-07-26)
+
+### Bug Fixes
+
+- **dedup**: Improve timestamp parsing and implement sliding window for burst deduplication
+  ([`a573eb9`](https://github.com/jbelew/immich-aesthetic-scorer/commit/a573eb994ddd45df136c29b847da54904c73109c))
+
+
 ## v1.2.0 (2026-07-26)
 
 ### Features
