@@ -25,18 +25,23 @@ graph TD
     H -->|Yes| I[Retrieve Cached Stage 2 Score]
     H -->|No| J["Stage 2: LLM Aesthetics Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
 
-    I --> K[Z-Score Sigmoid Fusion & Deduplication]
+    I --> K[Z-Score Sigmoid Fusion]
     J --> K
 
-    F -->|No| L[Score Standardization & Deduplication]
+    F -->|No| L[Score Standardization]
 
-    K --> M[Select Top Highlights: limit]
-    L --> M
+    K --> N{Write Ratings Enabled?}
+    L --> N
 
-    M --> N{Write Ratings Enabled?}
-    N -->|Yes| O[Star Rating Sync: native metadata update]
-    O --> P[Compile Highlights Target Album]
+    N -->|Yes| O[Star Rating Sync for All Scored Assets: native metadata update]
+    O --> P{Deduplication Window > 0?}
     N -->|No| P
+
+    P -->|Yes| Q[Sliding Window Burst Deduplication]
+    Q --> R[Select Top Highlights: limit]
+    P -->|No| R
+
+    R --> S[Compile Highlights Target Album]
 ```
 
 ---
