@@ -37,8 +37,10 @@ graph TD
     N --> P[Select Top Highlights: limit]
     O --> P
 
-    P --> Q[Star Rating Sync: native metadata update]
-    P --> R[Compile Highlights Target Album]
+    P --> Q{Write Ratings Enabled?}
+    Q -->|Yes| R[Star Rating Sync: native metadata update]
+    R --> S[Compile Highlights Target Album]
+    Q -->|No| S
 ```
 
 ## Recommended Workflow (Cost & Quality Optimization)
