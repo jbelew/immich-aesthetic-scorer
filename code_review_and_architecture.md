@@ -14,7 +14,7 @@ graph TD
     B --> C[Stage 1: Coarse Quality/Aesthetic Evaluation]
     C --> D{Stage 1 Cached?}
     D -->|Yes| E[Retrieve Cached Stage 1 Score]
-    D -->|No| F[Download 512px Thumbnail & Evaluate]
+    D -->|No| F[Download Preview Thumbnail, Downscale to 512px & Evaluate]
     E --> H{Two-Stage Enabled?}
     F --> H
 
@@ -22,7 +22,7 @@ graph TD
     I --> J["Stage 2: Remote LLM/VLM Aesthetics Evaluation (Recommended) or Local Technical Quality"]
     J --> K{Stage 2 Cached?}
     K -->|Yes| L[Retrieve Cached Stage 2 Score]
-    K -->|No| M["Download 512px Thumbnail (Remote) or Full Preview (Local) & Evaluate"]
+    K -->|No| M["Download Preview Thumbnail, Downscale to 512px (Remote) or Keep Original (Local) & Evaluate"]
     L --> N[Z-Score Sigmoid Fusion & Deduplication]
     M --> N
 
