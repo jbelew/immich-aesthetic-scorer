@@ -1340,7 +1340,7 @@ def main():
     )
     parser.add_argument(
         "--local-model",
-        help="Hugging Face model ID for local scoring (default: shunk031/aesthetics-predictor-v1-vit-large-patch14)",
+        help="Hugging Face model ID for local scoring (default: somepago/AestheticSigLIP)",
     )
     parser.add_argument("--gemini-model", help="Gemini model ID to use (default: gemini-2.5-flash)")
     parser.add_argument("--openai-key", help="OpenAI API Key (or for OpenAI-compatible providers)")
@@ -1438,7 +1438,7 @@ def main():
         args.local_model,
         "LOCAL_MODEL_ID",
         "local_model_id",
-        "shunk031/aesthetics-predictor-v1-vit-large-patch14",
+        "somepago/AestheticSigLIP",
     )
     gemini_model = resolve(args.gemini_model, "GEMINI_MODEL", "gemini_model", "gemini-2.5-flash")
     openai_key = resolve(args.openai_key, "OPENAI_API_KEY", "openai_api_key", None)
