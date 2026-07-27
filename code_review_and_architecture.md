@@ -45,7 +45,7 @@ graph TD
 
 ### A. Two-Stage Pipelines & Model Compatibility
 - **Stage 1 (Composition/Aesthetics)**: Designed to run efficiently over the entire asset library. By downscaling image preview thumbnails locally to `512px` before querying remote APIs, token payload size is reduced by up to 14x.
-- **Stage 2 (Local Technical Quality or Remote Advanced Aesthetics)**: Restricts evaluation to a target subset of candidates (configured via `stage2_top_pct` percentage value). Local models (like `musiq-spaq` via `pyiqa`) process unscaled preview thumbnails (`max_dim=None`) to evaluate overall perceived photographic quality, whereas remote LLMs (Gemini/OpenAI) evaluate aesthetics/composition on a cost-saving `512px` thumbnail using the advanced aesthetic prompt.
+- **Stage 2 (Aesthetics Evaluation)**: Restricts evaluation to a target subset of candidates (configured via `stage2_top_pct` percentage value). It sends these candidates to remote LLMs/VLMs (Gemini/OpenAI) to evaluate framing, composition, pose, and facial expressions on a cost-saving `512px` thumbnail using the advanced aesthetic prompt.
 
 ### B. Z-Score Standardization & Sigmoid Normalization
 Since Stage 1 and Stage 2 models output raw values on different scales (e.g. 0-10 for local aesthetic model, 0-100 for MUSIQ, 0-100 for Gemini/OpenAI API responses), directly combining raw scores leads to bias. To address this, the pipeline performs **Z-Score Standardization**:
