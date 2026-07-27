@@ -23,7 +23,7 @@ graph TD
     G --> H{Stage 2 Cached?}
 
     H -->|Yes| I[Retrieve Cached Stage 2 Score]
-    H -->|No| J["Stage 2: Aesthetics/Technical Quality Evaluation (Download Preview, Downscale/Keep & Evaluate)"]
+    H -->|No| J["Stage 2: LLM Aesthetics Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
 
     I --> K[Z-Score Sigmoid Fusion & Deduplication]
     J --> K
