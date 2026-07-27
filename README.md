@@ -112,7 +112,7 @@ This hybrid setup ensures that:
    ```
 
 3. **Install Local Model Dependencies (Optional)**:
-   If you wish to run evaluation models locally and offline (such as the default SigLIP aesthetic scorer or the Stage 2 MUSIQ sharpness scorer):
+   If you wish to run evaluation models locally and offline (such as the default SigLIP aesthetic scorer or the optional Stage 2 MUSIQ photographic quality model):
    ```bash
    pip install -r requirements-ml.txt
    ```
@@ -223,7 +223,7 @@ If critical parameters (like Immich Server URL and API Key) are missing from the
 | `--concurrency`| Maximum parallel threads for downloads/scoring | `5` |
 | `--delay` | Pacing delay in seconds between remote requests | `4.0` (Use `0.5` or lower on paid/local) |
 | `--dedup-window`| Deduplicate burst photos within N seconds | `0` (Disabled) |
-| `--two-stage` | Enable two-stage scoring (Stage 1 Aesthetics, Stage 2 Local Technical Quality or Remote Advanced Aesthetics) | Off |
+| `--two-stage` | Enable two-stage scoring (Stage 1 Coarse Aesthetics, Stage 2 Deep-dive LLM Aesthetics Evaluation) | Off |
 | `--stage2-top-pct`| Percentage of top candidates to evaluate in Stage 2 | `15.0` |
 | `--stage2-model`| Model ID for Stage 2 evaluation (e.g. `musiq-spaq`, `gemini-2.5-flash`, `gpt-4o-mini`) | `gemini-2.5-flash` |
 | `--stage2-weight`| Balance weight of Stage 2 score in combined total (0.0 to 1.0) | `0.5` |
@@ -236,12 +236,11 @@ If critical parameters (like Immich Server URL and API Key) are missing from the
 
 ## Scoring & Rating Metadata System
 
-### Aesthetic Assessment Criteria
-1. **Focus/Sharpness**: Heavy penalty for motion blur, camera shake, or missed focus on the subject.
-2. **Lighting**: Penalty for flat, severe backlighting, underexposure, or blown-out highlights.
-3. **Composition**: Evaluates photographic framing, aspect ratio, clean backgrounds, and margins.
-4. **Expression/Pose**: Bonus for smiles, laughter, engaged candids, and open eyes.
-5. **Highlight Suitability**: Evaluates if the photo looks like a highlight showcase rather than a random background burst.
+### Aesthetic Assessment Criteria (LLM Stage 2)
+1. **Composition**: Clean framing, good angles, and clean backgrounds (penalties for distracting elements or awkward crops).
+2. **Lighting & Exposure**: Well-exposed lighting and natural contrast (penalties for heavy underexposure or blown-out highlights).
+3. **Subject & Expression**: Natural posture, engaging candids, and flattering expressions (no closed eyes, blinks, or awkward mid-speech faces).
+4. **Highlight Suitability**: Suitability for a curated display album (avoiding mundane or repetitive captures).
 
 ### Immich Star Rating Sync Mapping
 When `--write-ratings` is enabled, the calculated aesthetic score (0-100) is translated and pushed directly to Immich's native star rating system as follows:
