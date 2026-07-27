@@ -11,30 +11,32 @@ The project is structured as a two-stage evaluation pipeline to optimize both co
 ```mermaid
 graph TD
     A[Immich Source: Person or Album] --> B[Fetch Assets: POST /search/metadata]
-    B --> C[Stage 1: Coarse Quality/Aesthetic Evaluation]
-    C --> D{Stage 1 Cached?}
-    D -->|Yes| E[Retrieve Cached Stage 1 Score]
-    D -->|No| F[Download Preview Thumbnail, Downscale to 512px & Evaluate]
-    E --> H{Two-Stage Enabled?}
-    F --> H
+    B --> C{Stage 1 Cached?}
 
-    H -->|Yes| I[Select Top Candidates: stage2_top_pct]
-    I --> J["Stage 2: Remote LLM/VLM Aesthetics Evaluation (Recommended) or Local Technical Quality"]
-    J --> K{Stage 2 Cached?}
-    K -->|Yes| L[Retrieve Cached Stage 2 Score]
-    K -->|No| M["Download Preview Thumbnail, Downscale to 512px (Remote) or Keep Original (Local) & Evaluate"]
-    L --> N[Z-Score Sigmoid Fusion & Deduplication]
-    M --> N
+    C -->|Yes| D[Retrieve Cached Stage 1 Score]
+    C -->|No| E["Stage 1: Coarse Quality/Aesthetic Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
 
-    H -->|No| O[Score Standardization & Deduplication]
+    D --> F{Two-Stage Enabled?}
+    E --> F
 
-    N --> P[Select Top Highlights: limit]
-    O --> P
+    F -->|Yes| G[Select Top Candidates: stage2_top_pct]
+    G --> H{Stage 2 Cached?}
 
-    P --> Q{Write Ratings Enabled?}
-    Q -->|Yes| R[Star Rating Sync: native metadata update]
-    R --> S[Compile Highlights Target Album]
-    Q -->|No| S
+    H -->|Yes| I[Retrieve Cached Stage 2 Score]
+    H -->|No| J["Stage 2: Aesthetics/Technical Quality Evaluation (Download Preview, Downscale/Keep & Evaluate)"]
+
+    I --> K[Z-Score Sigmoid Fusion & Deduplication]
+    J --> K
+
+    F -->|No| L[Score Standardization & Deduplication]
+
+    K --> M[Select Top Highlights: limit]
+    L --> M
+
+    M --> N{Write Ratings Enabled?}
+    N -->|Yes| O[Star Rating Sync: native metadata update]
+    O --> P[Compile Highlights Target Album]
+    N -->|No| P
 ```
 
 ---
