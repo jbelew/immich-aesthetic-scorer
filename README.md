@@ -68,7 +68,7 @@ This hybrid setup ensures that:
 >    * *Performance:* Very fast. Evaluates **512px downscaled thumbnails**; takes **0.2 to 0.5s per image** on CPU (near-instant on GPU).
 > 2. `rsinema/aesthetic-scorer` (Stage 1 Alternative): CLIP-based (ViT-L/14) model. Strong on single-person portraiture but biased against landscapes and complex scenes.
 >    * *Performance:* Very fast. Evaluates **512px downscaled thumbnails**; takes **0.1 to 0.3s per image** on CPU.
-> 3. `musiq-spaq` (Default Local Stage 2 Model): A Multi-scale Image Quality Transformer (MUSIQ) trained on the Smartphone Photographic Quality (SPAQ) dataset. It predicts overall perceived image quality (MOS) based on human subjective ratings.
+> 3. `musiq-spaq` (Local Model Option for Stage 2): A Multi-scale Image Quality Transformer (MUSIQ) trained on the Smartphone Photographic Quality (SPAQ) dataset. It predicts overall perceived image quality (MOS) based on human subjective ratings.
 >    * *Performance:* **Slower on CPU**. Because this model evaluates unscaled images, it downloads and processes **full unscaled preview images** (typically 1440px to 2048px). Expect **5.0 to 15.0s per image** on CPU (runs fast on CUDA-compatible GPUs).
 >
 > *If you are curating albums containing mostly group shots or complex scenes, you can also select `gemini` or `openai` as your Stage 1 scorer for advanced multimodal capabilities.*
@@ -217,7 +217,7 @@ If critical parameters (like Immich Server URL and API Key) are missing from the
 | `--dedup-window`| Deduplicate burst photos within N seconds | `0` (Disabled) |
 | `--two-stage` | Enable two-stage scoring (Stage 1 Aesthetics, Stage 2 Local Technical Quality or Remote Advanced Aesthetics) | Off |
 | `--stage2-top-pct`| Percentage of top candidates to evaluate in Stage 2 | `15.0` |
-| `--stage2-model`| Model ID for Stage 2 evaluation (e.g. `musiq-spaq`, `gemini-2.5-flash`, `gpt-4o-mini`) | `musiq-spaq` |
+| `--stage2-model`| Model ID for Stage 2 evaluation (e.g. `musiq-spaq`, `gemini-2.5-flash`, `gpt-4o-mini`) | `gemini-2.5-flash` |
 | `--stage2-weight`| Balance weight of Stage 2 score in combined total (0.0 to 1.0) | `0.5` |
 | `--use-cache-only`| Compile highlight album from cache, skipping scoring | Off |
 | `--cache-file` | Path to the local JSON score cache file | `.immich_aesthetic_cache.json` |

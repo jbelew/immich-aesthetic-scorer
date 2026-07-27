@@ -1382,7 +1382,7 @@ def main():
     )
     parser.add_argument(
         "--stage2-model",
-        help="Model ID for Stage 2 scoring (default: musiq-spaq)",
+        help="Model ID for Stage 2 scoring (default: gemini-2.5-flash)",
     )
     parser.add_argument(
         "--stage2-weight",
@@ -1509,7 +1509,7 @@ def main():
     except (ValueError, TypeError):
         stage2_top_pct = 15.0
 
-    stage2_model = resolve(args.stage2_model, "STAGE2_MODEL", "stage2_model", "musiq-spaq")
+    stage2_model = resolve(args.stage2_model, "STAGE2_MODEL", "stage2_model", "gemini-2.5-flash")
 
     stage2_weight_val = resolve(args.stage2_weight, "STAGE2_WEIGHT", "stage2_weight", 0.5)
     try:
