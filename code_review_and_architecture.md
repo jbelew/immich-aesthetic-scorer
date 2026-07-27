@@ -16,22 +16,25 @@ graph TD
     C -->|Yes| D[Retrieve Cached Stage 1 Score]
     C -->|No| E["Stage 1: Coarse Quality/Aesthetic Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
 
-    D --> F{Two-Stage Enabled?}
+    D --> F[Stage 1 Normalization: Z-Score & Sigmoid]
     E --> F
 
-    F -->|Yes| G[Select Top Candidates: stage2_top_pct]
-    G --> H{Stage 2 Cached?}
+    F --> G{Two-Stage Enabled?}
 
-    H -->|Yes| I[Retrieve Cached Stage 2 Score]
-    H -->|No| J["Stage 2: LLM Aesthetics Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
+    G -->|Yes| H[Select Top Candidates: stage2_top_pct]
+    H --> I{Stage 2 Cached?}
 
-    I --> K[Z-Score Sigmoid Fusion]
-    J --> K
+    I -->|Yes| J[Retrieve Cached Stage 2 Score]
+    I -->|No| K["Stage 2: LLM Aesthetics Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
 
-    F -->|No| L[Score Standardization]
+    J --> L[Z-Score Sigmoid Fusion & Fallback Assignment]
+    K --> L
+    H -->|Non-Candidates| L
 
-    K --> N{Write Ratings Enabled?}
-    L --> N
+    G -->|No| M[Use Normalized Stage 1 Score]
+
+    L --> N{Write Ratings Enabled?}
+    M --> N
 
     N -->|Yes| O[Star Rating Sync for All Scored Assets: native metadata update]
     O --> P{Deduplication Window > 0?}
