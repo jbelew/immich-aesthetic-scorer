@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "immich-aesthetic-scorer"
-version = "1.2.1"
+version = "1.3.0"
 description = "Aesthetic scorer for Immich using CLIP or Gemini/OpenAI vision models"
 readme = "README.md"
 license = {file = "LICENSE"}

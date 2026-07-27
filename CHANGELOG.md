@@ -2,6 +2,68 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-07-27)
+
+### Build System
+
+- Update pyright pre-commit hook to v1.1.411
+  ([`863f06d`](https://github.com/jbelew/immich-aesthetic-scorer/commit/863f06dbc984487c22437e6dbf16cc9c6db8216d))
+
+### Documentation
+
+- Add list of tested local models to README
+  ([`b4a069f`](https://github.com/jbelew/immich-aesthetic-scorer/commit/b4a069f8c696f5c9a2a4d57ad70ec0f813ce8e0a))
+
+- Align Stage 2 diagram nodes to refer to LLM Aesthetics Evaluation
+  ([`b6f8f5d`](https://github.com/jbelew/immich-aesthetic-scorer/commit/b6f8f5d2a269112bb34dcd02057edff4420d9657))
+
+- Align Stage 2 text descriptions to refer strictly to LLM Aesthetics Evaluation
+  ([`9e5ab1f`](https://github.com/jbelew/immich-aesthetic-scorer/commit/9e5ab1fe8f38931c2a15ec1769f7e87ba0c24059))
+
+- Clarify thumbnail downscaling in flow diagrams
+  ([`d75c87e`](https://github.com/jbelew/immich-aesthetic-scorer/commit/d75c87e9ea0bb2d8522888c55d4b3b474a8471a2))
+
+- Correct description of musiq-spaq as a photographic quality evaluator
+  ([`1ddb816`](https://github.com/jbelew/immich-aesthetic-scorer/commit/1ddb8161cac38888555533edf1fbec45be4f533e))
+
+- Document local model processing speeds in README
+  ([`a2eb7ee`](https://github.com/jbelew/immich-aesthetic-scorer/commit/a2eb7ee7f36ccd9117d113c1fa5f4fbce1522755))
+
+- Position cache check before evaluation in diagrams
+  ([`e620dc3`](https://github.com/jbelew/immich-aesthetic-scorer/commit/e620dc35a7aca91f53ede8e8035154b1157e9ccb))
+
+- Quote Mermaid labels containing parentheses to fix syntax error
+  ([`a3ea681`](https://github.com/jbelew/immich-aesthetic-scorer/commit/a3ea6816939469c82f736a81a703bf7dfa1bcf76))
+
+- Refine final steps of flow diagrams to show conditional write-ratings sync
+  ([`b561fdd`](https://github.com/jbelew/immich-aesthetic-scorer/commit/b561fddf0950487e8e08a309858fa52047c7d6f4))
+
+- Specify Stage 2 remote LLM recommendation in Mermaid diagram
+  ([`6e8dcf2`](https://github.com/jbelew/immich-aesthetic-scorer/commit/6e8dcf274f87ec005f5023d1c62d3d35949e6f6d))
+
+- Update architecture document to reflect SigLIP default and std dev floor
+  ([`2e0681f`](https://github.com/jbelew/immich-aesthetic-scorer/commit/2e0681f9d84142625bf93cefa6eaa74fc6c498ac))
+
+- Update references from CLIP to SigLIP default model in README
+  ([`e8052ee`](https://github.com/jbelew/immich-aesthetic-scorer/commit/e8052ee3d72982cf24b1a450cd1d788137458972))
+
+- Update system architecture flow diagram in README
+  ([`a4228c7`](https://github.com/jbelew/immich-aesthetic-scorer/commit/a4228c74014c7c0b8bd931b8d421d5aa207f7b4d))
+
+### Features
+
+- **cli**: Make gemini-2.5-flash the default Stage 2 model
+  ([`ad79e33`](https://github.com/jbelew/immich-aesthetic-scorer/commit/ad79e33bcd00bc515a3ad3f91e31b05441a3dd36))
+
+- **cli**: Set default local-model to somepago/AestheticSigLIP
+  ([`7c3f142`](https://github.com/jbelew/immich-aesthetic-scorer/commit/7c3f1420ea0ac9f011fade363843f349457bae5e))
+
+### Testing
+
+- Skip local model tests if ML dependencies are missing
+  ([`185c747`](https://github.com/jbelew/immich-aesthetic-scorer/commit/185c74743b41a1d855cfb6938a841a514665ffcb))
+
+
 ## v1.2.1 (2026-07-26)
 
 ### Bug Fixes
