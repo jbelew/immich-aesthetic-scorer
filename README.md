@@ -68,8 +68,8 @@ This hybrid setup ensures that:
 >    * *Performance:* Very fast. Evaluates **512px downscaled thumbnails**; takes **0.2 to 0.5s per image** on CPU (near-instant on GPU).
 > 2. `rsinema/aesthetic-scorer` (Stage 1 Alternative): CLIP-based (ViT-L/14) model. Strong on single-person portraiture but biased against landscapes and complex scenes.
 >    * *Performance:* Very fast. Evaluates **512px downscaled thumbnails**; takes **0.1 to 0.3s per image** on CPU.
-> 3. `musiq-spaq` (Stage 2 Default): MUSIQ-based technical quality assessment model (evaluating sharpness, noise, exposure) from PyIQA.
->    * *Performance:* **Slower on CPU**. Because this model inspects pixel-level technical quality, it downloads and processes **full unscaled preview images** (typically 1440px to 2048px). Expect **5.0 to 15.0s per image** on CPU (runs fast on CUDA-compatible GPUs).
+> 3. `musiq-spaq` (Default Local Stage 2 Model): A Multi-scale Image Quality Transformer (MUSIQ) trained on the Smartphone Photographic Quality (SPAQ) dataset. It predicts overall perceived image quality (MOS) based on human subjective ratings.
+>    * *Performance:* **Slower on CPU**. Because this model evaluates unscaled images, it downloads and processes **full unscaled preview images** (typically 1440px to 2048px). Expect **5.0 to 15.0s per image** on CPU (runs fast on CUDA-compatible GPUs).
 >
 > *If you are curating albums containing mostly group shots or complex scenes, you can also select `gemini` or `openai` as your Stage 1 scorer for advanced multimodal capabilities.*
 
@@ -79,7 +79,7 @@ This hybrid setup ensures that:
 - **Interactive Person & Album Search**: You can search for people by name using Immich's facial recognition database or list and search existing albums directly from the CLI.
 - **Two-Stage Scoring Pipeline**:
   - **Stage 1 (Coarse Quality Filtering or Aesthetics)**: Evaluates the entire library using a fast, free local quality model (`somepago/AestheticSigLIP` by default) or Gemini/OpenAI APIs.
-  - **Stage 2 (Technical Quality or Aesthetics Evaluation)**: Filters the top percentage of candidates from Stage 1. Runs local `musiq-spaq` to filter technical defects (sharpness, noise, motion blur), OR invokes commercial APIs (Gemini/OpenAI) as a "photography judge" to perform deep-dive aesthetics, expression, and composition verification.
+  - **Stage 2 (Technical Quality or Aesthetics Evaluation)**: Filters the top percentage of candidates from Stage 1. Runs local `musiq-spaq` to evaluate perceived photographic quality, OR invokes commercial APIs (Gemini/OpenAI) as a "photography judge" to perform deep-dive aesthetics, expression, and composition verification.
   - **Sigmoid Z-Score Fusion**: Standardizes scores from both stages mathematically to a common scale before performing a weighted combination. Non-candidates in two-stage scoring receive a fallback Stage 2 score of 50.0 (representing the population mean) to prevent score deflation and maintain mathematical continuity.
 - **Model-Aware Smart Cache**: Scores are saved locally in `.immich_aesthetic_cache.json` alongside their model configuration. If you change models, the script automatically invalidates and re-scores only the affected stages/assets, maintaining full backward compatibility.
 - **API Cost Reduction (Client-Side Downscaling)**: For API-based scoring, downscales preview thumbnails to 512px locally. This keeps composition intact while placing requests in the lowest token billing bracket.
