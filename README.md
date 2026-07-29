@@ -16,41 +16,33 @@ The project is structured as a two-stage evaluation pipeline to optimize both co
 
 ```mermaid
 graph TD
-    A[Immich Source: Person or Album] --> B[Fetch Assets: POST /search/metadata]
-    B --> C{Stage 1 Cached?}
+    %% Ingestion Phase
+    subgraph Ingestion [1. Ingestion]
+        A([Immich Source: Person or Album]) --> B["Fetch Assets<br>(POST /search/metadata)"]
+    end
 
-    C -->|Yes| D[Retrieve Cached Stage 1 Score]
-    C -->|No| E["Stage 1: Coarse Quality/Aesthetic Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
+    %% Stage 1 Filtering
+    subgraph Stage1 [2. Stage 1: Coarse Filtering]
+        B --> C["Stage 1: Coarse Evaluation & Normalization<br>(Downscale preview to 512px & evaluate; apply Z-Score & Sigmoid normalization)"]
+    end
 
-    D --> F[Stage 1 Normalization: Z-Score & Sigmoid]
-    E --> F
+    %% Stage 2 Deep Curation
+    subgraph Stage2 [3. Stage 2: Deep Curation]
+        C --> D{Two-Stage Enabled?}
+        D -->|Yes| E["Stage 2: LLM Aesthetics Evaluation<br>(Filter top % candidates, evaluate candidates on 512px preview, apply score fusion & assign fallback to non-candidates)"]
+    end
 
-    F --> G{Two-Stage Enabled?}
+    %% Post-Processing & Album Compilation
+    subgraph PostProcessing [4. Post-Processing & Compilation]
+        D -->|No| F[Final Composite Scores]
+        E --> F
+        F --> G["Post-Processing Filters<br>(Sync star ratings to Immich and/or apply sliding-window burst deduplication if enabled)"]
+        G --> H([Compile Target Album])
+    end
 
-    G -->|Yes| H[Select Top Candidates: stage2_top_pct]
-    H --> I{Stage 2 Cached?}
-
-    I -->|Yes| J[Retrieve Cached Stage 2 Score]
-    I -->|No| K["Stage 2: LLM Aesthetics Evaluation (Download Preview, Downscale to 512px & Evaluate)"]
-
-    J --> L[Z-Score Sigmoid Fusion & Fallback Assignment]
-    K --> L
-    H -->|Non-Candidates| L
-
-    G -->|No| M[Use Normalized Stage 1 Score]
-
-    L --> N{Write Ratings Enabled?}
-    M --> N
-
-    N -->|Yes| O[Star Rating Sync for All Scored Assets: native metadata update]
-    O --> P{Deduplication Window > 0?}
-    N -->|No| P
-
-    P -->|Yes| Q[Sliding Window Burst Deduplication]
-    Q --> R[Select Top Highlights: limit]
-    P -->|No| R
-
-    R --> S[Compile Highlights Target Album]
+    %% Cache Storage
+    Cache[(Local Cache File)] <-->|Read/Write Scores| C
+    Cache <-->|Read/Write Scores| E
 ```
 
 ## Recommended Workflow (Cost & Quality Optimization)
