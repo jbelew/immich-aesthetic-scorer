@@ -16,12 +16,23 @@ import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from getpass import getpass
 from typing import Any, Optional
 
 import requests
 from tqdm import tqdm
+
+from immich_aesthetic_scorer.pipeline import (  # noqa: F401
+    PopulationStats,
+    ScorePipeline,
+    calculate_population_stats,
+    deduplicate_bursts,
+    fuse_scores,
+    normalize_z_score,
+    parse_asset_time,
+    score_to_stars,
+    select_candidates,
+)
 
 # Comment out global CUDA disable to allow users with compatible GPUs (compute capability >= 7.0) to use GPU acceleration.
 # Older/unsupported GPUs will gracefully fall back to CPU via device check logic in score_image_local.
@@ -1185,27 +1196,6 @@ def extract_raw_score_from_reason(reason):
     return None
 
 
-def score_to_stars(score):
-    """Maps a standardized 0-100 composite aesthetic score into a 1-5 star rating.
-
-    Args:
-        score (float): Composite standard quality score.
-
-    Returns:
-        int: Star rating value (1, 2, 3, 4, or 5).
-    """
-    if score >= 90:
-        return 5
-    elif score >= 75:
-        return 4
-    elif score >= 50:
-        return 3
-    elif score >= 20:
-        return 2
-    else:
-        return 1
-
-
 def update_asset_rating(immich_url, api_key, asset_id, rating):
     """Updates the native star rating metadata value of a specific asset on the Immich server.
 
@@ -1223,72 +1213,6 @@ def update_asset_rating(immich_url, api_key, asset_id, rating):
         r.raise_for_status()
     except Exception as e:
         print(f"\nWarning: Failed to update rating in Immich for asset {asset_id}: {e}")
-
-
-def parse_asset_time(asset_item):
-    """Parses chronological datetime from Immich asset metadata."""
-    asset_info = asset_item.get("asset") or {}
-    time_str = (
-        asset_info.get("localDateTime")
-        or asset_info.get("fileCreatedAt")
-        or asset_info.get("createdAt")
-    )
-    if not time_str:
-        return datetime.min
-    try:
-        # Standardize 'Z' to '+00:00' to support all python fromisoformat versions
-        cleaned_str = time_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(cleaned_str)
-        # Strip timezone awareness to allow safe subtraction and comparisons with naive datetimes
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        return dt
-    except Exception:
-        return datetime.min
-
-
-def deduplicate_bursts(scored_assets, dedup_window):
-    """Filters out burst photos captured within a specific time window.
-
-    Sorts the assets chronologically, groups them into time-based clusters using a
-    sliding/rolling window, and preserves only the highest scoring asset from each cluster.
-    """
-    if dedup_window <= 0 or not scored_assets:
-        return scored_assets
-
-    # Sort assets chronologically to group them
-    chrono_assets = []
-    for item in scored_assets:
-        chrono_assets.append((parse_asset_time(item), item))
-    chrono_assets.sort(key=lambda x: x[0])
-
-    deduped_assets = []
-    current_group = []
-
-    for dt, item in chrono_assets:
-        if dt == datetime.min:
-            # If timestamp parsing fails, keep it individually
-            deduped_assets.append(item)
-            continue
-
-        if not current_group:
-            current_group.append((dt, item))
-        else:
-            # Sliding window: compare with the most recent item in the current group
-            diff = (dt - current_group[-1][0]).total_seconds()
-            if diff <= dedup_window:
-                current_group.append((dt, item))
-            else:
-                # Keep the highest scoring item from the group
-                best_item = max(current_group, key=lambda x: x[1]["score"])[1]
-                deduped_assets.append(best_item)
-                current_group = [(dt, item)]
-
-    if current_group:
-        best_item = max(current_group, key=lambda x: x[1]["score"])[1]
-        deduped_assets.append(best_item)
-
-    return deduped_assets
 
 
 def main():

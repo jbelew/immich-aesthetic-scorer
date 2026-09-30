@@ -29,6 +29,10 @@ immich-aesthetic-scorer = "score_assets:main"
 
 [tool.setuptools]
 py-modules = ["score_assets"]
+packages = ["immich_aesthetic_scorer"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
 
 [tool.semantic_release]
 version_toml = [
@@ -54,7 +58,7 @@ select = [
 ignore = ["E501", "C901"]
 
 [tool.pyright]
-include = ["score_assets.py"]
+include = ["score_assets.py", "immich_aesthetic_scorer", "tests"]
 pythonVersion = "3.9"
 typeCheckingMode = "basic"
 venvPath = "."
