@@ -2,6 +2,32 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-09-30)
+
+### Documentation
+
+- Add normalization and candidate branching detail to flow diagrams
+  ([`e763677`](https://github.com/jbelew/immich-aesthetic-scorer/commit/e763677af215c31f0bccc569f4223a15f0b7fc97))
+
+- Add refactoring spec and agent skills documentation
+  ([`8274146`](https://github.com/jbelew/immich-aesthetic-scorer/commit/827414649c9d824cf808405c7dd36bef937d9044))
+
+- Align README descriptions and criteria to LLM Stage 2
+  ([`ee679a3`](https://github.com/jbelew/immich-aesthetic-scorer/commit/ee679a37867005c0484731535dce63f34ae8243d))
+
+- Correct order of rating sync and deduplication in flow diagrams
+  ([`ee1c882`](https://github.com/jbelew/immich-aesthetic-scorer/commit/ee1c882a9d3cb4b1fc74868ccb213f4291660193))
+
+- Simplify system architecture Mermaid diagram in README.md
+  ([`6bc2dc1`](https://github.com/jbelew/immich-aesthetic-scorer/commit/6bc2dc167544e8bd63e8ba2e02f23001a35248fc))
+
+### Features
+
+- **pipeline**: Implement pure score pipeline and statistical calibration
+  ([#4](https://github.com/jbelew/immich-aesthetic-scorer/pull/4),
+  [`8b4411f`](https://github.com/jbelew/immich-aesthetic-scorer/commit/8b4411fea3d517091f181c5e4a49a45dfc968a58))
+
+
 ## v1.3.0 (2026-07-27)
 
 ### Build System
