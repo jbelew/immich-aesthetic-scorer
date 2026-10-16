@@ -14,6 +14,11 @@ from immich_aesthetic_scorer.evaluators import (
     create_evaluator,
     negotiate_torch_device,
 )
+from immich_aesthetic_scorer.gateway import (
+    ImmichGateway,
+    ImmichGatewayError,
+    ServerVersion,
+)
 from immich_aesthetic_scorer.pipeline import (
     PopulationStats,
     ScorePipeline,
@@ -40,6 +45,8 @@ __all__ = [
     "FakeEvaluator",
     "GeminiEvaluator",
     "ImageEvaluator",
+    "ImmichGateway",
+    "ImmichGatewayError",
     "LocalClipEvaluator",
     "OpenAIEvaluator",
     "PopulationStats",
@@ -47,6 +54,7 @@ __all__ = [
     "RateLimiter",
     "RsinemaAestheticScorer",
     "ScorePipeline",
+    "ServerVersion",
     "calculate_population_stats",
     "create_evaluator",
     "deduplicate_bursts",
