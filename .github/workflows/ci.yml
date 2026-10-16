@@ -20,7 +20,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -e . pytest ruff pyright
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        pip install -e ".[ml]" pytest ruff pyright
     - name: Lint and check formatting with Ruff
       run: |
         ruff check .

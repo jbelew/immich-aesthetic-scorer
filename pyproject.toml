@@ -20,6 +20,7 @@ ml = [
     "torch",
     "torchvision",
     "transformers",
+    "huggingface-hub",
     "simple-aesthetics-predictor",
     "pyiqa",
 ]
@@ -65,5 +66,3 @@ convention = "google"
 include = ["score_assets.py", "immich_aesthetic_scorer", "tests"]
 pythonVersion = "3.9"
 typeCheckingMode = "basic"
-venvPath = "."
-venv = ".venv"

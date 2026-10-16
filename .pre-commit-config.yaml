@@ -18,8 +18,8 @@ repos:
     rev: v1.1.411
     hooks:
       - id: pyright
-        # Ensure it works when run in virtual env
-        args: [ --warnings ]
+        # Ensure it resolves packages from the local .venv while running in pre-commit's isolated env
+        args: [ --warnings, --pythonpath, .venv/bin/python ]
 
   - repo: local
     hooks:
