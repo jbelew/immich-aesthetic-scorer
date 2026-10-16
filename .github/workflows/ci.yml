@@ -20,7 +20,14 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -e . pytest
+        pip install -e . pytest ruff pyright
+    - name: Lint and check formatting with Ruff
+      run: |
+        ruff check .
+        ruff format --check .
+    - name: Typecheck with Pyright
+      run: |
+        pyright
     - name: Run tests with pytest
       run: |
         pytest

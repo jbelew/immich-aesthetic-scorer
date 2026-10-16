@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""
-Immich Aesthetic Scorer & Highlight Album Creator
-Uses Gemini Flash or local models to score assets of a specific person in Immich and compiles the best into a highlight album.
+"""Immich Aesthetic Scorer & Highlight Album Creator.
+
+Uses Gemini Flash, OpenAI, or local models to score assets of a specific person or album
+in Immich and compiles the highest-scoring photos into a highlight album.
 """
 
 import argparse
@@ -1097,6 +1098,7 @@ def update_asset_rating(immich_url, api_key, asset_id, rating):
 
 
 def main():
+    """CLI entrypoint for scoring Immich assets and compiling highlight albums."""
     parser = argparse.ArgumentParser(description="Immich Aesthetic Scorer & Album Compiler")
     parser.add_argument(
         "--config", default="config.json", help="Path to config JSON file (default: config.json)"
@@ -1407,7 +1409,9 @@ def main():
             default_album = (
                 f"Best of Album {album_name_source}"
                 if album_name_source
-                else f"Best of Album {album_id[:8]}" if album_id else "Best of Album"
+                else f"Best of Album {album_id[:8]}"
+                if album_id
+                else "Best of Album"
             )
         target_album_name = input(f"Enter target album name [{default_album}]: ").strip()
         if not target_album_name:

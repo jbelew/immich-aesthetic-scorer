@@ -54,8 +54,16 @@ select = [
     "F",   # pyflakes
     "I",   # isort (import sorting)
     "C90", # mccabe complexity
+    "D",   # pydocstyle (docstrings)
 ]
-ignore = ["E501", "C901"]
+ignore = ["E501", "C901", "D105", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D101", "D102", "D103"]
+"test_*.py" = ["D100", "D101", "D102", "D103"]
 
 [tool.pyright]
 include = ["score_assets.py", "immich_aesthetic_scorer", "tests"]

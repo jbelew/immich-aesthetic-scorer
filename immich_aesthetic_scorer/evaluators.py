@@ -50,6 +50,14 @@ class RsinemaAestheticScorer(BaseModule):
         self.content_head = nn.Sequential(nn.Linear(768, 1))
 
     def forward(self, pixel_values: Any) -> Any:
+        """Computes 7-attribute aesthetic and quality predictions from CLIP vision features.
+
+        Args:
+            pixel_values: Preprocessed tensor of shape (batch_size, 3, 224, 224).
+
+        Returns:
+            Tensor of shape (batch_size, 7) where index 0 is overall aesthetics (0.0–5.0).
+        """
         outputs = self.backbone(pixel_values=pixel_values)
         pooled = outputs[1]
         aesthetic = self.aesthetic_head(pooled)
@@ -63,7 +71,17 @@ class RsinemaAestheticScorer(BaseModule):
 
 
 def negotiate_torch_device(torch_module: Any = None) -> str:
-    """Returns 'cuda' if CUDA is available with compute capability >= 7.0, else 'cpu'."""
+    """Negotiates PyTorch compute device with CUDA capability floor.
+
+    PyTorch cu130 binaries require CUDA compute capability >= 7.0 (Volta sm_70+).
+    Older GPUs or driver query errors gracefully fall back to CPU.
+
+    Args:
+        torch_module: Optional injected torch module for testing.
+
+    Returns:
+        Device identifier string ('cuda' or 'cpu').
+    """
     t = torch_module if torch_module is not None else torch
     if t is None:
         return "cpu"
@@ -79,7 +97,13 @@ def negotiate_torch_device(torch_module: Any = None) -> str:
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """Result of an image aesthetic or technical quality evaluation."""
+    """Result of an image aesthetic or technical quality evaluation.
+
+    Attributes:
+        raw_score: Uncalibrated model output (0.0–10.0 for Stage 1, 0.0–100.0 for Stage 2).
+        reason: Human-readable explanation or formatted raw score string.
+        score: Optional 0–100 integer score for single-stage compatibility.
+    """
 
     raw_score: float
     reason: str | None = None
@@ -101,12 +125,18 @@ class ImageEvaluator(Protocol):
     """Unified evaluation seam for Stage 1 and Stage 2 image quality evaluators."""
 
     @property
-    def model_id(self) -> str: ...
+    def model_id(self) -> str:
+        """Configured model identifier used for cache invalidation."""
+        ...
 
     @property
-    def required_max_dimension(self) -> int | None: ...
+    def required_max_dimension(self) -> int | None:
+        """Maximum thumbnail dimension in pixels (512 for coarse/remote, None for full-res IQA)."""
+        ...
 
-    def evaluate(self, image_bytes: bytes) -> EvaluationResult: ...
+    def evaluate(self, image_bytes: bytes) -> EvaluationResult:
+        """Evaluates raw image bytes and returns an EvaluationResult."""
+        ...
 
 
 FakeScoreSource = Optional[
@@ -136,13 +166,16 @@ class FakeEvaluator:
 
     @property
     def model_id(self) -> str:
+        """Returns the fake model identifier."""
         return self._model_id
 
     @property
     def required_max_dimension(self) -> int | None:
+        """Returns the configured maximum thumbnail dimension."""
         return self._required_max_dimension
 
     def evaluate(self, image_bytes: bytes) -> EvaluationResult:
+        """Records image_bytes thread-safely and returns a deterministic EvaluationResult."""
         with self._lock:
             self.evaluated_images.append(image_bytes)
 
@@ -156,6 +189,7 @@ class FakeEvaluator:
             return val
 
         raw = float(val)
+        # Scale 0-10 scores to 0-100 integer range to mirror local CLIP temporary scaling
         scaled = int(round(raw * 10.0)) if raw <= 10.0 else int(round(raw))
         return EvaluationResult(
             raw_score=raw,
@@ -182,10 +216,12 @@ class LocalClipEvaluator:
 
     @property
     def model_id(self) -> str:
+        """Returns the Hugging Face model repository identifier."""
         return self._model_id
 
     @property
     def required_max_dimension(self) -> int | None:
+        """Returns 512px default thumbnail ceiling for CLIP/SigLIP vision backbones."""
         return self._required_max_dimension
 
     def _infer_rsinema(self, image: Any) -> float:
@@ -196,6 +232,7 @@ class LocalClipEvaluator:
             raw_score = float(outputs[0][0].item())
         else:
             raw_score = float(outputs[0].item())
+        # Rsinema overall head outputs 0.0-5.0; double to align with the 0.0-10.0 Stage 1 scale
         return raw_score * 2.0
 
     def _infer_siglip(self, image: Any) -> float:
@@ -274,6 +311,14 @@ class LocalClipEvaluator:
             self._infer_fn = self._infer_predictor
 
     def evaluate(self, image_bytes: bytes) -> EvaluationResult:
+        """Evaluates image_bytes locally under a thread lock and torch.no_grad().
+
+        Args:
+            image_bytes: Encoded image bytes (JPEG/PNG).
+
+        Returns:
+            EvaluationResult with raw_score on 0.0–10.0 scale and preliminary 0–100 score.
+        """
         with self._lock:
             self._ensure_loaded()
             assert self._infer_fn is not None
@@ -308,10 +353,12 @@ class PyIQAEvaluator:
 
     @property
     def model_id(self) -> str:
+        """Returns the PyIQA metric name (e.g. 'musiq-spaq')."""
         return self._model_id
 
     @property
     def required_max_dimension(self) -> int | None:
+        """Returns None so full-resolution preview thumbnails are preserved for sharpness analysis."""
         return self._required_max_dimension
 
     def _ensure_loaded(self) -> None:
@@ -338,8 +385,17 @@ class PyIQAEvaluator:
         self._metric = pyiqa.create_metric(self._model_id, device=self._device)
 
     def evaluate(self, image_bytes: bytes) -> EvaluationResult:
+        """Evaluates technical image quality in-memory using a PIL RGB Image under torch.no_grad().
+
+        Args:
+            image_bytes: Unscaled preview image bytes.
+
+        Returns:
+            EvaluationResult containing raw technical quality score.
+        """
         with self._lock:
             self._ensure_loaded()
+            # Decode directly into an in-memory PIL Image to avoid filesystem temp file I/O
             image = Image.open(io.BytesIO(image_bytes))
             if image.mode != "RGB":
                 image = image.convert("RGB")
@@ -393,6 +449,7 @@ class RateLimiter:
         self._last_call_time: float | None = None
 
     def wait(self) -> None:
+        """Reserves the next time slot thread-safely and sleeps outside the lock if needed."""
         if self.delay <= 0.0:
             return
         with self._lock:
@@ -401,6 +458,7 @@ class RateLimiter:
                 self._last_call_time = now
                 sleep_time = 0.0
             else:
+                # Advance _last_call_time inside the lock so concurrent callers queue into distinct slots
                 elapsed = now - self._last_call_time
                 sleep_time = max(0.0, self.delay - elapsed)
                 self._last_call_time = now + sleep_time
@@ -444,10 +502,12 @@ class _BaseRemoteVisionEvaluator:
 
     @property
     def model_id(self) -> str:
+        """Returns the remote vision model identifier."""
         return self._model_id
 
     @property
     def required_max_dimension(self) -> int | None:
+        """Returns 512px thumbnail limit to minimize vision token usage."""
         return self._required_max_dimension
 
     def _build_request(self, image_b64: str) -> tuple[str, dict[str, str], dict[str, Any]]:
@@ -457,6 +517,17 @@ class _BaseRemoteVisionEvaluator:
         raise NotImplementedError
 
     def evaluate(self, image_bytes: bytes) -> EvaluationResult:
+        """Paces the request, posts base64 JPEG payload with exponential backoff, and parses JSON score.
+
+        Args:
+            image_bytes: JPEG image bytes (typically downscaled to <= 512px).
+
+        Returns:
+            EvaluationResult with raw_score scaled by raw_scale (0.1 for Stage 1, 1.0 for Stage 2).
+
+        Raises:
+            RuntimeError: On permanent 4xx errors or when max_retries are exhausted on 429/5xx.
+        """
         self._rate_limiter.wait()
 
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
