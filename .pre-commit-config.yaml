@@ -25,7 +25,7 @@ repos:
     hooks:
       - id: run-tests
         name: Run Unit Tests
-        entry: .venv/bin/pytest
+        entry: env CUDA_VISIBLE_DEVICES="" .venv/bin/pytest
         language: system
         pass_filenames: false
         always_run: true

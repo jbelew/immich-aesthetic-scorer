@@ -33,15 +33,12 @@ packages = ["immich_aesthetic_scorer"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.semantic_release]
 version_toml = [
     "pyproject.toml:project.version"
 ]
-
-[tool.black]
-line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
 
 [tool.ruff]
 line-length = 100
@@ -62,8 +59,7 @@ ignore = ["E501", "C901", "D105", "D107"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["D101", "D102", "D103"]
-"test_*.py" = ["D100", "D101", "D102", "D103"]
+"tests/**/*.py" = ["D100", "D101", "D102", "D103"]
 
 [tool.pyright]
 include = ["score_assets.py", "immich_aesthetic_scorer", "tests"]

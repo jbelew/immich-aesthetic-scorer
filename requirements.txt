@@ -1,4 +1,0 @@
-# Core dependencies (required for remote Gemini/OpenAI API scoring)
-requests
-tqdm
-pillow

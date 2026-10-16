@@ -155,7 +155,7 @@ def get_or_prompt(
     return cleaned
 
 
-def check_immich_connection(immich_url: str, api_key: str) -> tuple[bool, int | str, Optional[int]]:
+def check_immich_connection(immich_url: str, api_key: str) -> tuple[bool, Any, Optional[int]]:
     """Verifies connection and returns `(True, major, minor)` or `(False, error_str, None)`."""
     gateway = ImmichGateway(immich_url, api_key, session=requests)
     try:

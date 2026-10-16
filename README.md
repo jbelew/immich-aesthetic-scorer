@@ -97,16 +97,16 @@ This hybrid setup ensures that:
    source .venv/bin/activate
    ```
 
-2. **Install Core Dependencies**:
+2. **Install Core Package & Dependencies**:
    Required libraries for network connections, progress bars, and basic image processing:
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
 
 3. **Install Local Model Dependencies (Optional)**:
    If you wish to run evaluation models locally and offline (such as the default SigLIP aesthetic scorer or the optional Stage 2 MUSIQ photographic quality model):
    ```bash
-   pip install -r requirements-ml.txt
+   pip install -e ".[ml]"
    ```
 
 4. **Configure Environment Variables (Optional)**:
@@ -246,13 +246,13 @@ When `--write-ratings` is enabled, the calculated aesthetic score (0-100) is tra
 
 ## Development & Code Quality
 
-See [code_review_and_architecture.md](./code_review_and_architecture.md) for a deep dive into the pipeline design, mathematics, and cache implementation.
+See [`docs/specs/0001-refactor-monolith-into-deep-modules.md`](./docs/specs/0001-refactor-monolith-into-deep-modules.md) for the module architecture (`ScorePipeline`, `EvaluationStore`, `ImageEvaluator`, `ImmichGateway`), score fusion mathematics, and cache invalidation design.
 
-This project is set up with pre-commit hooks for static analysis, formatting, and type-checking.
+This project is set up with pre-commit hooks for static analysis, formatting, type-checking, and automated tests.
 
 1. **Install Dev Dependencies**:
    ```bash
-   pip install pre-commit ruff black pyright
+   pip install pre-commit pytest ruff pyright
    ```
 
 2. **Initialize Hooks**:
@@ -261,7 +261,7 @@ This project is set up with pre-commit hooks for static analysis, formatting, an
    ```
 
 3. **Run Checks Locally**:
-   - Format: `black score_assets.py`
-   - Lint: `ruff check score_assets.py`
-   - Type-check: `pyright score_assets.py`
-   - Test: `python -m unittest test_score_assets.py`
+   - Format: `ruff format .`
+   - Lint: `ruff check .`
+   - Type-check: `pyright`
+   - Test: `pytest`

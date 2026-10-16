@@ -2,16 +2,21 @@
 config.json
 .env
 .immich_aesthetic_cache.json
-.ruff_cache
+.ruff_cache/
+.pytest_cache/
 
-# Python virtual environment and bytecode
+# Python virtual environment, packaging, and bytecode
 .venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+build/
+dist/
 
-# Local IDE folders
+# Local IDE and OS artifacts
 .vscode/
 .idea/
 .DS_Store
+*:Zone.Identifier
