@@ -13,6 +13,7 @@ from immich_aesthetic_scorer.evaluators import (
     RsinemaAestheticScorer,
     create_evaluator,
     negotiate_torch_device,
+    resize_image_bytes,
 )
 from immich_aesthetic_scorer.gateway import (
     ImmichGateway,
@@ -65,6 +66,7 @@ __all__ = [
     "negotiate_torch_device",
     "normalize_z_score",
     "parse_asset_time",
+    "resize_image_bytes",
     "save_cache",
     "score_to_stars",
     "select_candidates",

@@ -273,6 +273,33 @@ class ImmichGateway:
             created_data = create_resp.json()
             album_id = str(created_data["id"])
 
+        self.add_assets_to_album(album_id, asset_ids, chunk_size=chunk_size)
+        return album_id
+
+    def add_assets_to_album(
+        self,
+        album_id: str,
+        asset_ids: Sequence[str],
+        *,
+        chunk_size: int = 100,
+    ) -> None:
+        """Registers asset IDs into an existing Immich album in `chunk_size` batches.
+
+        Deduplicates `asset_ids` while preserving order before sending `PUT /api/albums/{id}/assets`
+        batches.
+
+        Args:
+            album_id: UUID of the target Immich album.
+            asset_ids: Ordered sequence of asset UUIDs to add.
+            chunk_size: Maximum asset IDs per `PUT /api/albums/{id}/assets` call (default: 100).
+
+        Raises:
+            ValueError: If `chunk_size <= 0`.
+            ImmichGatewayError: If any batch `PUT` request fails.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+
         # Deduplicate across the full input before chunking so an asset ID
         # repeated across 100-item boundaries is not sent in multiple PUT calls.
         seen: set[str] = set()
@@ -286,8 +313,6 @@ class ImmichGateway:
         for i in range(0, len(unique_ids), chunk_size):
             batch = unique_ids[i : i + chunk_size]
             self._request("put", assets_endpoint, json={"ids": batch}, timeout=30)
-
-        return album_id
 
     def update_asset_rating(self, asset_id: str, rating: int) -> None:
         """Updates the native star rating (`1–5`) on a single Immich asset.

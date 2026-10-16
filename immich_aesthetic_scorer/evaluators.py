@@ -95,6 +95,51 @@ def negotiate_torch_device(torch_module: Any = None) -> str:
     return "cpu"
 
 
+def resize_image_bytes(image_bytes: bytes, max_dim: Optional[int] = 512) -> bytes:
+    """Resizes image bytes proportionally so the longest edge does not exceed `max_dim`.
+
+    Args:
+        image_bytes: Raw encoded image bytes (JPEG/PNG).
+        max_dim: Maximum pixel dimension on the longest edge (`512` for coarse/remote LLM
+            scoring; `None` or `<= 0` returns `image_bytes` unchanged).
+
+    Returns:
+        Encoded image bytes (re-compressed at quality 85 if resized).
+    """
+    if max_dim is None or max_dim <= 0:
+        return image_bytes
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        orig_format = img.format or "JPEG"
+
+        width, height = img.size
+        if width > max_dim or height > max_dim:
+            if width > height:
+                new_width = max_dim
+                new_height = int(height * (max_dim / width))
+            else:
+                new_height = max_dim
+                new_width = int(width * (max_dim / height))
+
+            if hasattr(Image, "Resampling"):
+                resample_method = getattr(Image.Resampling, "LANCZOS")
+            elif hasattr(Image, "LANCZOS"):
+                resample_method = getattr(Image, "LANCZOS")
+            else:
+                resample_method = getattr(Image, "ANTIALIAS")
+
+            img = img.resize((new_width, new_height), resample_method)
+
+            out_bytes = io.BytesIO()
+            img.save(out_bytes, format=orig_format, quality=85)
+            return out_bytes.getvalue()
+    except Exception as exc:
+        print(f"Warning: Failed to resize thumbnail client-side: {exc}")
+
+    return image_bytes
+
+
 @dataclass(frozen=True)
 class EvaluationResult:
     """Result of an image aesthetic or technical quality evaluation.

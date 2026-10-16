@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """Immich Aesthetic Scorer & Highlight Album Creator.
 
-Uses Gemini Flash, OpenAI, or local models to score assets of a specific person or album
-in Immich and compiles the highest-scoring photos into a highlight album.
+CLI driver and backward-compatible facade coordinating `ScorePipeline`,
+`EvaluationStore`, `ImageEvaluator`, and `ImmichGateway`.
 """
 
+from __future__ import annotations
+
 import argparse
-import base64
-import io
 import json
 import logging
-import math
 import os
 import sys
 import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from getpass import getpass
-from typing import Any, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import requests
 from tqdm import tqdm
 
+import immich_aesthetic_scorer.evaluators as _evaluators_mod
 from immich_aesthetic_scorer.evaluators import (  # noqa: F401
     AESTHETIC_PROMPT,
     EvaluationResult,
@@ -36,6 +37,12 @@ from immich_aesthetic_scorer.evaluators import (  # noqa: F401
     RsinemaAestheticScorer,
     create_evaluator,
     negotiate_torch_device,
+    resize_image_bytes,
+)
+from immich_aesthetic_scorer.gateway import (  # noqa: F401
+    ImmichGateway,
+    ImmichGatewayError,
+    ServerVersion,
 )
 from immich_aesthetic_scorer.pipeline import (  # noqa: F401
     PopulationStats,
@@ -57,10 +64,6 @@ from immich_aesthetic_scorer.store import (  # noqa: F401
     save_cache,
 )
 
-# Comment out global CUDA disable to allow users with compatible GPUs (compute capability >= 7.0) to use GPU acceleration.
-# Older/unsupported GPUs will gracefully fall back to CPU via device check logic in score_image_local.
-# os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
 # Suppress Hugging Face hub telemetry/symlinks warnings and other log noises
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -72,37 +75,35 @@ warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub"
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
-# Set up logging levels to silence verbose warnings/report tables from Hugging Face & Transformers
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
-# Define optional ML modules as Any to satisfy static type checking for conditional imports
+# Optional ML modules exposed at module scope for backward compatibility with existing tests
 torch: Any = None
 Image: Any = None
 CLIPProcessor: Any = None
 pyiqa: Any = None
 
-# Import local scoring libraries globally at startup to prevent thread-safety races during parallel execution
 try:
     import torch
 
+    # Restrict PyTorch CPU intra-op threads to prevent thread contention across parallel workers
     torch.set_num_threads(1)
     from PIL import Image
     from transformers import CLIPProcessor
 except ImportError:
-    pass
+    from PIL import Image
 
 try:
     import pyiqa
 except ImportError:
     pass
 
-
-# Constants
+# Default CLI configuration constants
 DEFAULT_GEMINI_KEY = None
 DEFAULT_LIMIT = 100
 DEFAULT_CONCURRENCY = 5
-DEFAULT_DELAY = 4.0  # 4 seconds delay = max 15 RPM for free tier
+DEFAULT_DELAY = 4.0  # 4.0s delay = max 15 RPM for free tier remote vision endpoints
 DEFAULT_CACHE_FILE = ".immich_aesthetic_cache.json"
 
 # ANSI escape codes for terminal coloring
@@ -116,148 +117,88 @@ COLOR_RED = "\033[31m"
 COLOR_MAGENTA = "\033[35m"
 COLOR_GRAY = "\033[90m"
 
-# Global lock and timestamp to serialize Gemini API calls across all threads (prevents 429 quota bursts)
-gemini_call_lock = threading.Lock()
-last_gemini_call_time = 0.0
+# Legacy module-level state preserved for backward-compatible test assertions
+local_model: Any = None
+local_processor: Any = None
+model_lock = threading.Lock()
+local_stage2_model: Any = None
+stage2_model_lock = threading.Lock()
+_cached_local_evaluator: Optional[LocalClipEvaluator] = None
+_cached_stage2_evaluator: Optional[PyIQAEvaluator] = None
 
 
-def get_or_prompt(env_name, prompt_text, secret=False, default=None):
-    """Retrieves a configuration value from environment variables or prompts the user.
+def _classify_stage2_provider(model_id: str) -> str:
+    lowered = model_id.lower()
+    if "gemini" in lowered:
+        return "gemini"
+    if "openai" in lowered or "gpt" in lowered:
+        return "openai"
+    return "local"
 
-    Provides support for hidden input (e.g. passwords/API keys) using standard `getpass`.
 
-    Args:
-        env_name (str): The name of the environment variable to look up.
-        prompt_text (str): Interactive prompt text displayed to the user.
-        secret (bool): If True, hides character input during terminal typing.
-        default (str, optional): Default value returned if the input is skipped.
-
-    Returns:
-        str: Resolved configuration value.
-    """
+def get_or_prompt(
+    env_name: str,
+    prompt_text: str,
+    secret: bool = False,
+    default: Optional[str] = None,
+) -> str:
+    """Retrieves a configuration value from environment variables or prompts the user interactively."""
     val = os.environ.get(env_name)
     if val:
         return val
 
-    display_prompt = prompt_text
-    if default:
-        display_prompt += f" [{default}]: "
-    else:
-        display_prompt += ": "
-
-    if secret:
-        val = getpass(display_prompt)
-    else:
-        val = input(display_prompt)
-
-    val = val.strip()
-    if not val and default:
+    display_prompt = f"{prompt_text} [{default}]: " if default else f"{prompt_text}: "
+    raw_input = getpass(display_prompt) if secret else input(display_prompt)
+    cleaned = raw_input.strip()
+    if not cleaned and default:
         return default
-    return val
+    return cleaned
 
 
-def check_immich_connection(immich_url, api_key):
-    """Verifies connection and retrieves the Immich server's major/minor version.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-
-    Returns:
-        tuple: (bool, major_version/error_str, minor_version/None)
-            - bool: True if connection succeeded, False otherwise.
-            - major_version/error_str: Major version integer if successful, error message string if failed.
-            - minor_version/None: Minor version integer if successful, None if failed.
-    """
-    url = f"{immich_url}/api/server/version"
-    headers = {"x-api-key": api_key}
+def check_immich_connection(immich_url: str, api_key: str) -> tuple[bool, int | str, Optional[int]]:
+    """Verifies connection and returns `(True, major, minor)` or `(False, error_str, None)`."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            version_data = r.json()
-            return True, version_data.get("major", 1), version_data.get("minor", 0)
-    except Exception as e:
-        return False, str(e), None
-    return False, f"Status code {r.status_code}", None
+        version = gateway.verify_connection()
+        return True, version.major, version.minor
+    except ImmichGatewayError as exc:
+        if exc.status_code is not None:
+            return False, f"Status code {exc.status_code}", None
+        return False, str(exc), None
 
 
-def get_person_details(immich_url, api_key, person_id):
-    """Retrieves metadata of a person from the Immich facial recognition database.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        person_id (str): UUID of the target person.
-
-    Returns:
-        dict: Person details (dictionary from response JSON), or None if request fails.
-    """
-    url = f"{immich_url}/api/people/{person_id}"
-    headers = {"x-api-key": api_key}
+def get_person_details(immich_url: str, api_key: str, person_id: str) -> Optional[dict[str, Any]]:
+    """Retrieves metadata of a person from Immich, or returns `None` on failure."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return None
+        return gateway.get_person_details(person_id)
+    except ImmichGatewayError:
+        return None
 
 
-def search_people_by_name(immich_url, api_key, query):
-    """Performs a search query against Immich people to find matches by name.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        query (str): Search term (e.g. name of the person).
-
-    Returns:
-        list: List of matching person records, or an empty list if search fails.
-    """
-    url = f"{immich_url}/api/search/person"
-    headers = {"x-api-key": api_key}
-    params = {"name": query}
+def search_people_by_name(immich_url: str, api_key: str, query: str) -> list[dict[str, Any]]:
+    """Searches Immich people by name substring, returning `[]` on error."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        print(f"Error searching people: {e}")
-    return []
+        return gateway.search_people(query)
+    except ImmichGatewayError as exc:
+        print(f"Error searching people: {exc}")
+        return []
 
 
-def select_person_interactive(immich_url, api_key):
-    """Guides the user through an interactive terminal search and selection for an Immich person.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-
-    Returns:
-        tuple: (person_id, person_name)
-            - person_id (str): Resolved UUID of the selected person.
-            - person_name (str): The name of the selected person (or None if manually inputted).
-    """
+def select_person_interactive(immich_url: str, api_key: str) -> tuple[Optional[str], Optional[str]]:
+    """Guides the user through an interactive terminal selection for an Immich person."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
     print("\n--- Person Selection ---")
     while True:
         query = input("Search for a person by name (or press Enter to list all): ").strip()
+        try:
+            results = gateway.search_people(query) if query else gateway.list_people(size=100)
+        except ImmichGatewayError as exc:
+            print(f"Error fetching people: {exc}")
+            results = []
 
-        if query:
-            results = search_people_by_name(immich_url, api_key, query)
-        else:
-            # Fetch all people
-            url = f"{immich_url}/api/people"
-            headers = {"x-api-key": api_key}
-            try:
-                r = requests.get(url, headers=headers, params={"size": 100}, timeout=10)
-                results = r.json() if r.status_code == 200 else []
-            except Exception as e:
-                print(f"Error fetching people: {e}")
-                results = []
-
-        # Filter hidden/unnamed people out of direct listings if they don't match query
         valid_people = [p for p in results if p.get("name")]
-
         if not valid_people:
             print("No matching named people found. Let's try again.")
             continue
@@ -273,10 +214,10 @@ def select_person_interactive(immich_url, api_key):
             choice = int(choice_str)
             if 1 <= choice <= len(valid_people):
                 selected = valid_people[choice - 1]
-                return selected["id"], selected.get("name")
-            elif choice == len(valid_people) + 1:
+                return str(selected["id"]), selected.get("name")
+            if choice == len(valid_people) + 1:
                 continue
-            elif choice == len(valid_people) + 2:
+            if choice == len(valid_people) + 2:
                 manual_uuid = input("Enter Person UUID: ").strip()
                 if manual_uuid:
                     return manual_uuid, None
@@ -284,51 +225,23 @@ def select_person_interactive(immich_url, api_key):
             print("Invalid input. Please enter a number.")
 
 
-def get_album_details(immich_url, api_key, album_id):
-    """Retrieves details/metadata of an album from the Immich server.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        album_id (str): UUID of the target album.
-
-    Returns:
-        dict: Album details dictionary, or None if request fails.
-    """
-    url = f"{immich_url}/api/albums/{album_id}"
-    headers = {"x-api-key": api_key}
+def get_album_details(immich_url: str, api_key: str, album_id: str) -> Optional[dict[str, Any]]:
+    """Retrieves metadata of an album from Immich, or returns `None` on failure."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return None
+        return gateway.get_album_details(album_id)
+    except ImmichGatewayError:
+        return None
 
 
-def select_album_interactive(immich_url, api_key):
-    """Guides the user through an interactive terminal search and selection for an Immich album.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-
-    Returns:
-        tuple: (album_id, album_name)
-            - album_id (str): Resolved UUID of the selected album.
-            - album_name (str): The name of the selected album (or None if manually inputted).
-    """
+def select_album_interactive(immich_url: str, api_key: str) -> tuple[Optional[str], Optional[str]]:
+    """Guides the user through an interactive terminal selection for an Immich album."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
     print("\n--- Album Selection ---")
-    url = f"{immich_url}/api/albums"
-    headers = {"x-api-key": api_key}
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code != 200:
-            print("Error: Could not retrieve albums list from server.")
-            return None, None
-        albums = r.json()
-    except Exception as e:
-        print(f"Error fetching albums: {e}")
+        albums = gateway.list_albums()
+    except ImmichGatewayError as exc:
+        print(f"Error fetching albums: {exc}")
         return None, None
 
     if not albums:
@@ -337,8 +250,7 @@ def select_album_interactive(immich_url, api_key):
 
     while True:
         query = input("Search for an album by name (or press Enter to list all): ").strip().lower()
-        filtered = [a for a in albums if query in a.get("albumName", "").lower()]
-
+        filtered = [a for a in albums if query in str(a.get("albumName", "")).lower()]
         if not filtered:
             print("No matching albums found. Let's try again.")
             continue
@@ -354,10 +266,10 @@ def select_album_interactive(immich_url, api_key):
             choice = int(choice_str)
             if 1 <= choice <= len(filtered):
                 selected = filtered[choice - 1]
-                return selected["id"], selected.get("albumName")
-            elif choice == len(filtered) + 1:
+                return str(selected["id"]), selected.get("albumName")
+            if choice == len(filtered) + 1:
                 continue
-            elif choice == len(filtered) + 2:
+            if choice == len(filtered) + 2:
                 manual_uuid = input("Enter Album UUID: ").strip()
                 if manual_uuid:
                     return manual_uuid, None
@@ -365,740 +277,238 @@ def select_album_interactive(immich_url, api_key):
             print("Invalid input. Please enter a number.")
 
 
-def fetch_all_image_assets(immich_url, api_key, person_id=None, album_id=None):
-    """Paginates through search/metadata endpoint to fetch all assets for a person or album.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        person_id (str, optional): Target person ID to query.
-        album_id (str, optional): Target album ID to query.
-
-    Returns:
-        list: Filtered list of asset dicts matching the target where type is "IMAGE".
-    """
-    url = f"{immich_url}/api/search/metadata"
-    headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-
-    assets = []
-    page = 1
-    size = 250
-
-    if person_id:
-        payload_key = "personIds"
-        payload_val = [person_id]
-        print(f"Fetching asset list for person ID: {person_id}...")
-    elif album_id:
-        payload_key = "albumIds"
-        payload_val = [album_id]
-        print(f"Fetching asset list for album ID: {album_id}...")
-    else:
-        raise ValueError("Either person_id or album_id must be provided")
-
-    while True:
-        payload = {payload_key: payload_val, "page": page, "size": size}
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-
-        items = data.get("assets", {}).get("items", [])
-        if not items:
-            break
-
-        # Filter for images
-        images = [item for item in items if item.get("type") == "IMAGE"]
-        assets.extend(images)
-        print(f"Fetched page {page} ({len(images)} images, cumulative: {len(assets)})")
-
-        if len(items) < size:
-            break
-
-        page += 1
-
-    return assets
+def fetch_all_image_assets(
+    immich_url: str,
+    api_key: str,
+    person_id: Optional[str] = None,
+    album_id: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Fetches all `IMAGE` assets for a person or album via `ImmichGateway`."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
+    return gateway.fetch_image_assets(person_id=person_id, album_id=album_id)
 
 
-def download_thumbnail(immich_url, api_key, asset_id, max_dim: Optional[int] = 512):
-    """Downloads uncropped preview thumbnail from Immich and resizes it client-side if specified.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        asset_id (str): UUID of the target asset.
-        max_dim (int, optional): Maximum dimension to resize the image to.
-            If None or <= 0, returns the raw unscaled preview image.
-
-    Returns:
-        bytes: Downloaded image bytes (potentially resized/re-compressed).
-    """
-    headers = {"x-api-key": api_key}
-    # Download the uncropped preview image
-    url = f"{immich_url}/api/assets/{asset_id}/thumbnail?size=preview"
-    r = requests.get(url, headers=headers, timeout=20)
-    r.raise_for_status()
-    image_bytes = r.content
-
-    if max_dim is None or max_dim <= 0:
-        return image_bytes
-
-    # Resize client-side to fit under max_dim limit (for 258-token Low-Res Mode)
-    try:
-        from PIL import Image
-
-        img = Image.open(io.BytesIO(image_bytes))
-        orig_format = img.format or "JPEG"
-
-        # Check current dimensions
-        width, height = img.size
-        if width > max_dim or height > max_dim:
-            if width > height:
-                new_width = max_dim
-                new_height = int(height * (max_dim / width))
-            else:
-                new_height = max_dim
-                new_width = int(width * (max_dim / height))
-
-            if hasattr(Image, "Resampling"):
-                resample_method = getattr(Image.Resampling, "LANCZOS")
-            elif hasattr(Image, "LANCZOS"):
-                resample_method = getattr(Image, "LANCZOS")
-            else:
-                resample_method = getattr(Image, "ANTIALIAS")
-
-            img = img.resize((new_width, new_height), resample_method)
-
-            # Save back to bytes
-            out_bytes = io.BytesIO()
-            img.save(out_bytes, format=orig_format, quality=85)
-            return out_bytes.getvalue()
-    except Exception as e:
-        print(f"Warning: Failed to resize thumbnail client-side: {e}")
-
-    return image_bytes
+def download_thumbnail(
+    immich_url: str,
+    api_key: str,
+    asset_id: str,
+    max_dim: Optional[int] = 512,
+) -> bytes:
+    """Downloads an uncropped preview thumbnail from Immich and optionally downscales it."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
+    raw_bytes = gateway.download_thumbnail(asset_id)
+    return resize_image_bytes(raw_bytes, max_dim=max_dim)
 
 
 def call_gemini_api(
-    api_key, image_bytes, model_name="gemini-2.5-flash", max_retries=5, initial_backoff=4.0
-):
-    """Evaluates the aesthetic quality and composition of an image using Google Gemini API.
+    api_key: str,
+    image_bytes: bytes,
+    model_name: str = "gemini-2.5-flash",
+    max_retries: int = 5,
+    initial_backoff: float = 4.0,
+) -> dict[str, Any]:
+    """Evaluates image aesthetic quality via `GeminiEvaluator` (0–100 integer score)."""
+    evaluator = GeminiEvaluator(
+        api_key=api_key,
+        model_id=model_name,
+        max_retries=max_retries,
+        initial_backoff=initial_backoff,
+        raw_scale=1.0,
+        session=requests,
+    )
+    res = evaluator.evaluate(image_bytes)
+    return {"score": res.score, "reason": res.reason}
 
-    Performs image-to-text prompt scoring, applying rate limit backing off.
 
-    Args:
-        api_key (str): Google Gemini API Key.
-        image_bytes (bytes): Binary data of the image.
-        model_name (str): Gemini model identifier.
-        max_retries (int): Maximum retry attempts for rate limits (429) or server errors.
-        initial_backoff (float): Initial wait time in seconds for exponential backoff.
+def call_openai_api(
+    api_key: str,
+    base_url: str,
+    model_name: str,
+    image_bytes: bytes,
+    max_retries: int = 5,
+    initial_backoff: float = 4.0,
+) -> dict[str, Any]:
+    """Evaluates image aesthetic quality via `OpenAIEvaluator` (0–100 integer score)."""
+    evaluator = OpenAIEvaluator(
+        api_key=api_key,
+        base_url=base_url,
+        model_id=model_name,
+        max_retries=max_retries,
+        initial_backoff=initial_backoff,
+        raw_scale=1.0,
+        session=requests,
+    )
+    res = evaluator.evaluate(image_bytes)
+    return {"score": res.score, "reason": res.reason}
 
-    Returns:
-        dict: A dictionary containing 'score' (int 0-100) and 'reason' (str).
+
+def score_image_local(image_bytes: bytes, model_id: str) -> dict[str, Any]:
+    """Evaluates image aesthetics locally using `LocalClipEvaluator` (0.0–10.0 raw scale).
+
+    Synchronizes module-level ML bindings (`torch`, `CLIPProcessor`, `RsinemaAestheticScorer`,
+    `Image`) with `immich_aesthetic_scorer.evaluators` so unit tests patching `score_assets.*`
+    intercept model loading and inference.
     """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": AESTHETIC_PROMPT},
-                    {"inlineData": {"mimeType": "image/jpeg", "data": image_b64}},
-                ]
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "score": {
-                        "type": "INTEGER",
-                        "description": "A quality and aesthetic appeal score for the image from 0 to 100.",
-                    },
-                    "reason": {
-                        "type": "STRING",
-                        "description": "A brief one-sentence reason explaining the score.",
-                    },
-                },
-                "required": ["score", "reason"],
-            },
-        },
-    }
-
-    backoff = initial_backoff
-    for attempt in range(max_retries):
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=30)
-            if r.status_code == 200:
-                res_json = r.json()
-                # Parse JSON output string from Gemini
-                text_out = res_json["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text_out)
-            elif r.status_code == 429:
-                print(
-                    f"\n[Gemini API] Rate limit hit (429). Details: {r.text[:300]}\nRetrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-                )
-                time.sleep(backoff)
-                backoff *= 2.0
-            elif r.status_code >= 500:
-                print(
-                    f"\n[Gemini API] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-                )
-                time.sleep(backoff)
-                backoff *= 1.5
-            else:
-                raise Exception(f"Gemini API error {r.status_code}: {r.text}")
-        except Exception as e:
-            # Do not retry on permanent API errors (like 400, 403, 404, etc.)
-            if "Gemini API error" in str(e):
-                raise e
-            if attempt == max_retries - 1:
-                raise e
-            print(
-                f"\n[Gemini API] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-            )
-            time.sleep(backoff)
-            backoff *= 1.5
-
-    raise Exception("Max retries exceeded for Gemini API")
-
-
-def call_openai_api(api_key, base_url, model_name, image_bytes, max_retries=5, initial_backoff=4.0):
-    """Evaluates the aesthetic quality and composition of an image using an OpenAI-compatible API.
-
-    Args:
-        api_key (str): Authentication API Key.
-        base_url (str): Target base URL of the API endpoint.
-        model_name (str): Model identifier.
-        image_bytes (bytes): Binary data of the image.
-        max_retries (int): Maximum retry attempts.
-        initial_backoff (float): Initial wait time in seconds for backoff.
-
-    Returns:
-        dict: A dictionary containing 'score' (int 0-100) and 'reason' (str).
-    """
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    prompt = AESTHETIC_PROMPT
-
-    payload = {
-        "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                    },
-                ],
-            }
-        ],
-        "response_format": {"type": "json_object"},
-    }
-
-    backoff = initial_backoff
-    for attempt in range(max_retries):
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=30)
-            if r.status_code == 200:
-                res_json = r.json()
-                text_out = res_json["choices"][0]["message"]["content"]
-                return json.loads(text_out)
-            elif r.status_code == 429:
-                print(
-                    f"\n[OpenAI API] Rate limit hit (429). Details: {r.text[:300]}\nRetrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-                )
-                time.sleep(backoff)
-                backoff *= 2.0
-            elif r.status_code >= 500:
-                print(
-                    f"\n[OpenAI API] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-                )
-                time.sleep(backoff)
-                backoff *= 1.5
-            else:
-                raise Exception(f"OpenAI API error {r.status_code}: {r.text}")
-        except Exception as e:
-            if "OpenAI API error" in str(e):
-                raise e
-            if attempt == max_retries - 1:
-                raise e
-            print(
-                f"\n[OpenAI API] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-            )
-            time.sleep(backoff)
-            backoff *= 1.5
-
-    raise Exception("Max retries exceeded for OpenAI API")
-
-
-# Local model state
-local_model = None
-local_processor = None
-model_lock = threading.Lock()
-
-
-def score_image_local(image_bytes, model_id):
-    """Evaluates the aesthetic quality and composition of an image locally using a CLIP-based module.
-
-    Pre-processes the image using CLIPProcessor, feeds it through RsinemaAestheticScorer,
-    and returns a raw aesthetic score (typically between 0.0 and 10.0).
-
-    Args:
-        image_bytes (bytes): Binary JPEG image content.
-        model_id (str): Hugging Face model identifier (e.g. 'rsinema/aesthetic-scorer').
-
-    Returns:
-        float: Aesthetic score.
-    """
-    global local_model, local_processor
-
-    if torch is None or CLIPProcessor is None or RsinemaAestheticScorer is None:
-        raise ImportError(
-            "\n[Error] Local aesthetic scoring requires torch, torchvision, and transformers.\n"
-            "Please install them inside the virtual environment by running:\n"
-            "    .venv/bin/pip install torch torchvision transformers\n"
-        )
-
-    # Determine device (fallback to CPU if GPU compute capability is < 7.0 for PyTorch cu130 compatibility)
-    device = "cpu"
-    if torch.cuda.is_available():
-        try:
-            major, _ = torch.cuda.get_device_capability(0)
-            if major >= 7:
-                device = "cuda"
-        except Exception:
-            pass
+    global local_model, local_processor, _cached_local_evaluator
 
     with model_lock:
-        if local_model is None:
-            print(f"\nLoading local aesthetic model '{model_id}'...")
-            if model_id == "rsinema/aesthetic-scorer":
-                from huggingface_hub import hf_hub_download
+        _evaluators_mod.torch = torch
+        _evaluators_mod.CLIPProcessor = CLIPProcessor
+        _evaluators_mod.RsinemaAestheticScorer = RsinemaAestheticScorer
+        _evaluators_mod.Image = Image
 
-                model_path = hf_hub_download(repo_id=model_id, filename="model.pt")
-                local_model = RsinemaAestheticScorer()
-                local_model.load_state_dict(torch.load(model_path, map_location=device))
-                local_model.to(device)
-                local_model.eval()
-                local_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-            elif "aestheticsiglip" in model_id.lower() or "siglip" in model_id.lower():
-                import sys
+        if (
+            local_model is None
+            or _cached_local_evaluator is None
+            or _cached_local_evaluator.model_id != model_id
+        ):
+            _cached_local_evaluator = LocalClipEvaluator(model_id=model_id)
 
-                from huggingface_hub import snapshot_download
-
-                model_dir = snapshot_download(repo_id=model_id)
-                if model_dir not in sys.path:
-                    sys.path.insert(0, model_dir)
-
-                from predict import AestheticScorer  # type: ignore
-
-                local_model = AestheticScorer.from_local(
-                    os.path.join(model_dir, "best.pt"), device=device
-                )
-            else:
-                try:
-                    from aesthetics_predictor import (
-                        AestheticsPredictorV1,
-                        AestheticsPredictorV2Linear,
-                        AestheticsPredictorV2ReLU,
-                    )
-                except ImportError:
-                    raise ImportError(
-                        "\n[Error] This model requires simple-aesthetics-predictor.\n"
-                        "Please install it inside the virtual environment by running:\n"
-                        "    .venv/bin/pip install simple-aesthetics-predictor\n"
-                    )
-
-                if "v2" in model_id.lower() or "improved" in model_id.lower():
-                    if "relu" in model_id.lower():
-                        PredictorClass = AestheticsPredictorV2ReLU
-                    else:
-                        PredictorClass = AestheticsPredictorV2Linear
-                else:
-                    PredictorClass = AestheticsPredictorV1
-
-                model_instance: Any = PredictorClass.from_pretrained(model_id)
-                local_model = model_instance.to(device)
-                local_processor = CLIPProcessor.from_pretrained(model_id)
-                local_model.eval()
-            print(f"Model loaded successfully on {device}!")
-
-        # Load and process image inside the lock to ensure thread-safety on CPU
-        try:
-            image = Image.open(io.BytesIO(image_bytes))
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-
-            if "aestheticsiglip" in model_id.lower() or "siglip" in model_id.lower():
-                assert local_model is not None, "Local model is not initialized"
-                raw_score = local_model.rate(image)
-            else:
-                assert local_processor is not None, "Local processor is not initialized"
-                assert local_model is not None, "Local model is not initialized"
-
-                inputs = local_processor(images=image, return_tensors="pt")
-
-                if model_id == "rsinema/aesthetic-scorer":
-                    pixel_values = inputs["pixel_values"].to(device)
-                    with torch.no_grad():
-                        outputs = local_model(pixel_values)
-                        # Extract Overall score (first dimension of output) and scale 0-5 -> 0-10
-                        if len(outputs.shape) > 1:
-                            raw_score = outputs[0][0].item()
-                        else:
-                            raw_score = outputs[0].item()
-                        raw_score = raw_score * 2.0
-                else:
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-                    with torch.no_grad():
-                        outputs = local_model(**inputs)
-                        raw_score = outputs.logits.item()
-
-            # Scale to 0-100 using temporary linear math.
-            # Scores will be dynamically calibrated at the end of the run
-            # based on the empirical mean and std dev of the entire library.
-            temp_score = int(round(raw_score * 10.0))
-
-            return {
-                "score": temp_score,
-                "raw_score": raw_score,
-                "reason": f"Local CLIP score: {raw_score:.2f}/10.0",
-            }
-        except Exception as e:
-            print(f"Error in local scoring: {e}")
-            raise e
+        result = _cached_local_evaluator.evaluate(image_bytes)
+        local_model = getattr(_cached_local_evaluator, "_model", None)
+        local_processor = getattr(_cached_local_evaluator, "_processor", None)
+        return result.to_dict()
 
 
 def call_gemini_api_stage2(
-    api_key, image_bytes, model_name="gemini-2.5-flash", max_retries=5, initial_backoff=4.0
-):
-    """Evaluates the aesthetic quality and composition of an image using Google Gemini API.
-
-    Applies a prompt targeting overall aesthetics, composition, lighting, and highlight suitability.
-
-    Args:
-        api_key (str): Gemini API Key.
-        image_bytes (bytes): Binary image content.
-        model_name (str): Gemini model identifier.
-        max_retries (int): Maximum retry attempts.
-        initial_backoff (float): Initial wait time in seconds for exponential backoff.
-
-    Returns:
-        float: Aesthetic quality score (0.0 to 100.0).
-    """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": AESTHETIC_PROMPT},
-                    {"inlineData": {"mimeType": "image/jpeg", "data": image_b64}},
-                ]
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "score": {
-                        "type": "INTEGER",
-                        "description": "A quality and aesthetic appeal score for the image from 0 to 100.",
-                    },
-                    "reason": {
-                        "type": "STRING",
-                        "description": "A brief one-sentence reason explaining the score.",
-                    },
-                },
-                "required": ["score", "reason"],
-            },
-        },
-    }
-
-    backoff = initial_backoff
-    for attempt in range(max_retries):
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=30)
-            if r.status_code == 200:
-                res_json = r.json()
-                text_out = res_json["candidates"][0]["content"]["parts"][0]["text"]
-                data = json.loads(text_out)
-                score = int(data["score"])
-                reason = data.get("reason")
-                return {"raw_score": float(score), "reason": reason}
-            elif r.status_code == 429:
-                print(
-                    f"\n[Gemini API Stage 2] Rate limit hit (429). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-                )
-                time.sleep(backoff)
-                backoff *= 2.0
-            elif r.status_code >= 500:
-                print(
-                    f"\n[Gemini API Stage 2] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-                )
-                time.sleep(backoff)
-                backoff *= 2.0
-            else:
-                raise Exception(f"Gemini API error {r.status_code}: {r.text}")
-        except Exception as e:
-            # Do not retry on permanent API errors (like 400, 403, 404, etc.)
-            if "Gemini API error" in str(e):
-                raise e
-            if attempt == max_retries - 1:
-                raise e
-            print(
-                f"\n[Gemini API Stage 2] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
-            )
-            time.sleep(backoff)
-            backoff *= 2.0
-
-    raise RuntimeError("Failed to evaluate Stage 2 with Gemini API after multiple attempts.")
+    api_key: str,
+    image_bytes: bytes,
+    model_name: str = "gemini-2.5-flash",
+    max_retries: int = 5,
+    initial_backoff: float = 4.0,
+) -> dict[str, Any]:
+    """Evaluates Stage 2 aesthetics via `GeminiEvaluator` (0.0–100.0 raw score)."""
+    evaluator = GeminiEvaluator(
+        api_key=api_key,
+        model_id=model_name,
+        max_retries=max_retries,
+        initial_backoff=initial_backoff,
+        raw_scale=1.0,
+        session=requests,
+    )
+    res = evaluator.evaluate(image_bytes)
+    return {"raw_score": res.raw_score, "reason": res.reason}
 
 
 def call_openai_api_stage2(
-    api_key, base_url, model_name, image_bytes, max_retries=5, initial_backoff=4.0
-):
-    """Evaluates the aesthetic quality and composition of an image using an OpenAI-compatible API.
-
-    Applies a prompt targeting overall aesthetics, composition, lighting, and highlight suitability.
-
-    Args:
-        api_key (str): Authentication API Key.
-        base_url (str): Target base URL of the API endpoint.
-        model_name (str): Model identifier.
-        image_bytes (bytes): Binary image content.
-        max_retries (int): Maximum retry attempts.
-        initial_backoff (float): Initial wait time in seconds for backoff.
-
-    Returns:
-        float: Aesthetic quality score (0.0 to 100.0).
-    """
-    url = f"{base_url}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-    prompt = AESTHETIC_PROMPT
-
-    payload = {
-        "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                    },
-                ],
-            }
-        ],
-        "response_format": {"type": "json_object"},
-    }
-
-    backoff = initial_backoff
-    for attempt in range(max_retries):
-        try:
-            r = requests.post(url, json=payload, headers=headers, timeout=45)
-            if r.status_code == 200:
-                res_json = r.json()
-                text_out = res_json["choices"][0]["message"]["content"]
-                data = json.loads(text_out)
-                score = int(data["score"])
-                reason = data.get("reason")
-                return {"raw_score": float(score), "reason": reason}
-            else:
-                time.sleep(backoff)
-                backoff *= 2.0
-        except Exception:
-            time.sleep(backoff)
-            backoff *= 2.0
-
-    raise RuntimeError("Failed to evaluate Stage 2 with OpenAI API after multiple attempts.")
-
-
-# Stage 2 model state
-local_stage2_model = None
-stage2_model_lock = threading.Lock()
+    api_key: str,
+    base_url: str,
+    model_name: str,
+    image_bytes: bytes,
+    max_retries: int = 5,
+    initial_backoff: float = 4.0,
+) -> dict[str, Any]:
+    """Evaluates Stage 2 aesthetics via `OpenAIEvaluator` (0.0–100.0 raw score)."""
+    evaluator = OpenAIEvaluator(
+        api_key=api_key,
+        base_url=base_url,
+        model_id=model_name,
+        max_retries=max_retries,
+        initial_backoff=initial_backoff,
+        raw_scale=1.0,
+        session=requests,
+    )
+    res = evaluator.evaluate(image_bytes)
+    return {"raw_score": res.raw_score, "reason": res.reason}
 
 
 def score_image_stage2(
-    image_bytes,
-    model_name="musiq-spaq",
-    gemini_key=None,
-    gemini_model=None,
-    openai_key=None,
-    openai_url=None,
-    openai_model=None,
-):
-    """Evaluates technical quality and sharpness of an image using a local MUSIQ model or a remote API.
+    image_bytes: bytes,
+    model_name: str = "musiq-spaq",
+    gemini_key: Optional[str] = None,
+    gemini_model: Optional[str] = None,
+    openai_key: Optional[str] = None,
+    openai_url: Optional[str] = None,
+    openai_model: Optional[str] = None,
+) -> dict[str, Any]:
+    """Evaluates Stage 2 technical or aesthetic quality via `create_evaluator`."""
+    global local_stage2_model, _cached_stage2_evaluator
 
-    Args:
-        image_bytes (bytes): Binary image content.
-        model_name (str): Quality model identifier (e.g. 'musiq-spaq' or 'gemini').
-        gemini_key (str, optional): Gemini API Key.
-        gemini_model (str, optional): Gemini model configuration ID.
-        openai_key (str, optional): OpenAI API Key.
-        openai_url (str, optional): OpenAI base URL.
-        openai_model (str, optional): OpenAI model configuration ID.
+    _evaluators_mod.pyiqa = pyiqa
+    provider = _classify_stage2_provider(model_name)
+    if provider == "local":
+        with stage2_model_lock:
+            if (
+                local_stage2_model is None
+                or _cached_stage2_evaluator is None
+                or _cached_stage2_evaluator.model_id != model_name
+            ):
+                _cached_stage2_evaluator = PyIQAEvaluator(model_id=model_name)
+            res = _cached_stage2_evaluator.evaluate(image_bytes)
+            local_stage2_model = getattr(_cached_stage2_evaluator, "_metric", None)
+            return {"raw_score": res.raw_score, "reason": res.reason}
 
-    Returns:
-        float: Raw quality score.
-    """
-    global local_stage2_model
-    import os
-    import tempfile
-
-    model_name_lower = model_name.lower()
-    if "gemini" in model_name_lower:
-        api_model = model_name if model_name != "gemini" else (gemini_model or "gemini-2.5-flash")
-        if not gemini_key:
-            raise ValueError(
-                "Google Gemini API Key is required for Stage 2 scoring when using gemini model."
-            )
-        return call_gemini_api_stage2(gemini_key, image_bytes, api_model)
-    elif "openai" in model_name_lower or "gpt" in model_name_lower:
-        api_model = model_name if model_name != "openai" else (openai_model or "gpt-4o-mini")
-        if not openai_key:
-            raise ValueError(
-                "OpenAI API Key is required for Stage 2 scoring when using openai model."
-            )
-        return call_openai_api_stage2(openai_key, openai_url, api_model, image_bytes)
-
-    if pyiqa is None or torch is None:
-        raise ImportError(
-            "\n[Error] Stage 2 scoring requires the pyiqa library.\n"
-            "Please install it inside the virtual environment by running:\n"
-            "    .venv/bin/pip install pyiqa\n"
-        )
-
-    device = "cpu"
-    if torch.cuda.is_available():
-        try:
-            major, _ = torch.cuda.get_device_capability(0)
-            if major >= 7:
-                device = "cuda"
-        except Exception:
-            pass
-
-    with stage2_model_lock:
-        if local_stage2_model is None:
-            print(f"\nLoading Stage 2 model '{model_name}' on {device}...")
-            local_stage2_model = pyiqa.create_metric(model_name, device=device)
-            print("Stage 2 model loaded successfully!")
-
-        # Create temporary file to pass to pyiqa
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".jpg")
-        try:
-            with os.fdopen(temp_fd, "wb") as tmp:
-                tmp.write(image_bytes)
-
-            with torch.no_grad():
-                score = local_stage2_model(temp_path)
-                val = float(score.item())
-                return {"raw_score": val, "reason": f"Local technical score: {val:.2f}"}
-        finally:
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
+    evaluator = create_evaluator(
+        stage=2,
+        stage2_model=model_name,
+        gemini_key=gemini_key,
+        gemini_model=gemini_model or "gemini-2.5-flash",
+        openai_key=openai_key,
+        openai_url=openai_url or "https://api.openai.com/v1",
+        openai_model=openai_model or "gpt-4o-mini",
+        session=requests,
+    )
+    res = evaluator.evaluate(image_bytes)
+    return {"raw_score": res.raw_score, "reason": res.reason}
 
 
-def get_or_create_album(immich_url, api_key, album_name):
-    """Retrieves an existing Immich album by name or creates a new one if missing.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        album_name (str): The target album name to find or create.
-
-    Returns:
-        str: UUID of the matched or newly created album.
-    """
-    headers = {"x-api-key": api_key}
-
-    # List albums
-    url = f"{immich_url}/api/albums"
-    r = requests.get(url, headers=headers, timeout=20)
-    r.raise_for_status()
-    albums = r.json()
-
-    for album in albums:
-        if album.get("albumName") == album_name:
-            print(f"Using existing album '{album_name}' (ID: {album['id']})")
-            return album["id"]
-
-    # Create new
-    print(f"Creating new album '{album_name}'...")
-    payload = {"albumName": album_name}
-    r = requests.post(url, json=payload, headers=headers, timeout=20)
-    r.raise_for_status()
-    new_album = r.json()
-    print(f"Created album (ID: {new_album['id']})")
-    return new_album["id"]
+def get_or_create_album(immich_url: str, api_key: str, album_name: str) -> str:
+    """Retrieves an existing Immich album by name or creates a new one if missing."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
+    return gateway.ensure_album_with_assets(album_name, [])
 
 
-def add_assets_to_album(immich_url, api_key, album_id, asset_ids):
-    """Registers a list of assets into an existing Immich album in chunked batches.
-
-    Splits the assets into batches of 100 to prevent large request failures,
-    deduplicating inputs within each batch.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        album_id (str): UUID of the target highlights album.
-        asset_ids (list): List of asset UUIDs to add.
-    """
-    url = f"{immich_url}/api/albums/{album_id}/assets"
-    headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-
-    chunk_size = 100
-    for i in range(0, len(asset_ids), chunk_size):
-        chunk = list(set(asset_ids[i : i + chunk_size]))  # deduplicate
-        payload = {"ids": chunk}
-        print(f"Adding chunk {i // chunk_size + 1} ({len(chunk)} items) to album...")
-        r = requests.put(url, json=payload, headers=headers, timeout=30)
-        r.raise_for_status()
+def add_assets_to_album(
+    immich_url: str, api_key: str, album_id: str, asset_ids: Sequence[str]
+) -> None:
+    """Registers a sequence of asset IDs into an existing Immich album in 100-item batches."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
+    gateway.add_assets_to_album(album_id, asset_ids)
 
 
-def update_asset_rating(immich_url, api_key, asset_id, rating):
-    """Updates the native star rating metadata value of a specific asset on the Immich server.
-
-    Args:
-        immich_url (str): Immich server base URL.
-        api_key (str): Immich API Key.
-        asset_id (str): UUID of the target asset.
-        rating (int): Rating value to write (1-5 stars).
-    """
-    url = f"{immich_url}/api/assets"
-    headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-    payload = {"ids": [asset_id], "rating": rating}
+def update_asset_rating(immich_url: str, api_key: str, asset_id: str, rating: int) -> None:
+    """Updates the native star rating (`1–5`) of an asset on the Immich server."""
+    gateway = ImmichGateway(immich_url, api_key, session=requests)
     try:
-        r = requests.put(url, json=payload, headers=headers, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"\nWarning: Failed to update rating in Immich for asset {asset_id}: {e}")
+        gateway.update_asset_rating(asset_id, rating)
+    except Exception as exc:
+        print(f"\nWarning: Failed to update rating in Immich for asset {asset_id}: {exc}")
 
 
-def main():
-    """CLI entrypoint for scoring Immich assets and compiling highlight albums."""
+@dataclass
+class ScorerConfig:
+    """Resolved runtime configuration for the aesthetic scoring workflow."""
+
+    config_path: str = "config.json"
+    immich_url: Optional[str] = None
+    api_key: Optional[str] = None
+    person_id: Optional[str] = None
+    album_id: Optional[str] = None
+    gemini_key: Optional[str] = None
+    target_album_name: Optional[str] = None
+    scorer_type: str = "gemini"
+    local_model_id: str = "somepago/AestheticSigLIP"
+    gemini_model: str = "gemini-2.5-flash"
+    openai_key: Optional[str] = None
+    openai_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4o-mini"
+    write_ratings: bool = False
+    limit: int = DEFAULT_LIMIT
+    concurrency: int = DEFAULT_CONCURRENCY
+    delay: float = DEFAULT_DELAY
+    cache_file: str = DEFAULT_CACHE_FILE
+    dedup_window: int = 0
+    dry_run: bool = False
+    force_score: bool = False
+    use_cache_only: bool = False
+    two_stage: bool = False
+    stage2_top_pct: float = 15.0
+    stage2_model: str = "gemini-2.5-flash"
+    stage2_weight: float = 0.5
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Constructs the CLI argument parser with all supported flags and defaults."""
     parser = argparse.ArgumentParser(description="Immich Aesthetic Scorer & Album Compiler")
     parser.add_argument(
         "--config", default="config.json", help="Path to config JSON file (default: config.json)"
@@ -1196,776 +606,680 @@ def main():
         type=float,
         help="Weight of Stage 2 score in the combined score (0.0 to 1.0, default: 0.5)",
     )
+    return parser
 
-    args = parser.parse_args()
 
-    # Load config file if it exists
-    config = {}
-    if os.path.exists(args.config):
+def resolve_config(
+    argv: Optional[Sequence[str]] = None,
+    env: Optional[Mapping[str, str]] = None,
+    config_override: Optional[Mapping[str, Any]] = None,
+) -> ScorerConfig:
+    """Parses CLI arguments and resolves configuration settings (`CLI > Env > Config JSON > Defaults`).
+
+    Args:
+        argv: Optional sequence of CLI argument strings (defaults to `sys.argv[1:]`).
+        env: Optional environment variable mapping (defaults to `os.environ`).
+        config_override: Optional pre-loaded config dictionary (bypasses disk read if given).
+
+    Returns:
+        Populated `ScorerConfig` instance.
+    """
+    parser = build_arg_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    env_map: Mapping[str, str] = env if env is not None else os.environ
+
+    config: dict[str, Any] = {}
+    if config_override is not None:
+        config = dict(config_override)
+    elif os.path.exists(args.config):
         try:
             with open(args.config, "r", encoding="utf-8") as f:
-                config = json.load(f)
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    config = loaded
             print(f"Loaded configuration settings from '{args.config}'")
-        except Exception as e:
-            print(f"Warning: Failed to load config from {args.config}: {e}")
+        except Exception as exc:
+            print(f"Warning: Failed to load config from {args.config}: {exc}")
 
-    def resolve(cli_val, env_name, config_key, default):
-        # 1. CLI Argument
+    def resolve(cli_val: Any, env_name: str, config_key: str, default: Any) -> Any:
+        # Precedence: CLI > Env > Config JSON > Defaults
         if cli_val is not None:
             return cli_val
-        # 2. Config JSON
+        env_val = env_map.get(env_name)
+        if env_val is not None and env_val.strip() != "":
+            return env_val
         if config and config_key in config:
             cfg_val = config[config_key]
             if cfg_val is not None and (not isinstance(cfg_val, str) or str(cfg_val).strip() != ""):
                 return cfg_val
-        # 3. Environment Variable
-        env_val = os.environ.get(env_name)
-        if env_val is not None and env_val.strip() != "":
-            return env_val
-        # 4. Default
         return default
 
-    # Resolve settings with CLI > Env > Config > Default precedence
+    def _to_int(val: Any, fallback: int) -> int:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return fallback
+
+    def _to_float(val: Any, fallback: float) -> float:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return fallback
+
+    def _resolve_bool(cli_flag: Optional[bool], config_key: str) -> bool:
+        if cli_flag is not None:
+            return bool(cli_flag)
+        return bool(config.get(config_key, False)) if config else False
+
     immich_url = resolve(args.immich_url, "IMMICH_URL", "immich_url", None)
+    if isinstance(immich_url, str):
+        immich_url = immich_url.rstrip("/")
+
     api_key = resolve(args.api_key, "IMMICH_API_KEY", "immich_api_key", None)
     person_id = resolve(args.person_id, "PERSON_ID", "person_id", None)
     album_id = resolve(args.album_id, "ALBUM_ID", "album_id", None)
 
-    # CLI arguments override config file target modes
+    # CLI target flags are mutually exclusive and override config/env targets
     if args.album_id is not None:
         person_id = None
     elif args.person_id is not None:
         album_id = None
-    gemini_key = resolve(args.gemini_key, "GEMINI_API_KEY", "gemini_api_key", None)
-    target_album_name = resolve(
-        args.target_album_name, "TARGET_ALBUM_NAME", "target_album_name", None
-    )
-    scorer_type = resolve(args.scorer_type, "SCORER_TYPE", "scorer_type", "gemini").lower()
-    local_model_id = resolve(
-        args.local_model,
-        "LOCAL_MODEL_ID",
-        "local_model_id",
-        "somepago/AestheticSigLIP",
-    )
-    gemini_model = resolve(args.gemini_model, "GEMINI_MODEL", "gemini_model", "gemini-2.5-flash")
-    openai_key = resolve(args.openai_key, "OPENAI_API_KEY", "openai_api_key", None)
-    openai_url = resolve(
-        args.openai_url, "OPENAI_BASE_URL", "openai_base_url", "https://api.openai.com/v1"
-    )
-    openai_model = resolve(args.openai_model, "OPENAI_MODEL", "openai_model", "gpt-4o-mini")
-    write_ratings = (
-        args.write_ratings
-        if args.write_ratings is not None
-        else (config.get("write_ratings", False) if config else False)
-    )
 
-    # Numeric values resolution
-    limit_val = resolve(args.limit, "LIMIT", "limit", DEFAULT_LIMIT)
-    try:
-        limit = int(limit_val)
-    except (ValueError, TypeError):
-        limit = DEFAULT_LIMIT
-
-    concurrency_val = resolve(args.concurrency, "CONCURRENCY", "concurrency", DEFAULT_CONCURRENCY)
-    try:
-        concurrency = int(concurrency_val)
-    except (ValueError, TypeError):
-        concurrency = DEFAULT_CONCURRENCY
-
-    # Default local delay to 0.0 unless user explicitly requested a delay
+    scorer_type = str(resolve(args.scorer_type, "SCORER_TYPE", "scorer_type", "gemini")).lower()
     default_delay = 0.0 if scorer_type == "local" else DEFAULT_DELAY
-    delay_val = resolve(args.delay, "DELAY", "delay", default_delay)
-    try:
-        delay = float(delay_val)
-    except (ValueError, TypeError):
-        delay = default_delay
 
-    cache_file = resolve(args.cache_file, "CACHE_FILE", "cache_file", DEFAULT_CACHE_FILE)
-
-    dedup_window_val = resolve(args.dedup_window, "DEDUP_WINDOW", "dedup_window", 0)
-    try:
-        dedup_window = int(dedup_window_val)
-    except (ValueError, TypeError):
-        dedup_window = 0
-
-    # Flag values resolution
-    dry_run = (
-        args.dry_run
-        if args.dry_run is not None
-        else (config.get("dry_run", False) if config else False)
-    )
-    force_score = (
-        args.force_score
-        if args.force_score is not None
-        else (config.get("force_score", False) if config else False)
-    )
-    use_cache_only = (
-        args.use_cache_only
-        if args.use_cache_only is not None
-        else (config.get("use_cache_only", False) if config else False)
-    )
-    two_stage = (
-        args.two_stage
-        if args.two_stage is not None
-        else (config.get("two_stage", False) if config else False)
-    )
-
-    stage2_top_pct_val = resolve(args.stage2_top_pct, "STAGE2_TOP_PCT", "stage2_top_pct", 15.0)
-    try:
-        stage2_top_pct = float(stage2_top_pct_val)
-    except (ValueError, TypeError):
-        stage2_top_pct = 15.0
-
-    stage2_model = resolve(args.stage2_model, "STAGE2_MODEL", "stage2_model", "gemini-2.5-flash")
-
-    stage2_weight_val = resolve(args.stage2_weight, "STAGE2_WEIGHT", "stage2_weight", 0.5)
-    try:
-        stage2_weight = float(stage2_weight_val)
-    except (ValueError, TypeError):
-        stage2_weight = 0.5
-
-    # Prompt user interactively if critical credentials are still missing
-    print("Welcome to Immich Aesthetic Scorer!")
-    if not immich_url:
-        immich_url = get_or_prompt(
-            "IMMICH_URL", "Enter Immich Server URL", default="http://localhost:2283"
-        )
-    immich_url = immich_url.rstrip("/")
-
-    if not api_key:
-        api_key = get_or_prompt("IMMICH_API_KEY", "Enter Immich API Key", secret=True)
-
-    # Verify Immich Connection
-    print("Verifying connection to Immich...")
-    connected, major, minor = check_immich_connection(immich_url, api_key)
-    if not connected:
-        print(f"Error: Could not connect to Immich at {immich_url}. Error: {major}")
-        sys.exit(1)
-    print(f"Connected successfully! Immich Server Version: {major}.{minor}")
-
-    # Resolve Person / Album Selection
-    person_name = None
-    album_name_source = None
-
-    if person_id:
-        person_details = get_person_details(immich_url, api_key, person_id)
-        if person_details:
-            person_name = person_details.get("name")
-            print(f"Selected Person: {person_name or 'Unnamed'} (ID: {person_id})")
-        else:
-            print(
-                f"Warning: Person ID {person_id} provided but could not fetch details from server."
+    return ScorerConfig(
+        config_path=args.config,
+        immich_url=immich_url,
+        api_key=api_key,
+        person_id=person_id,
+        album_id=album_id,
+        gemini_key=resolve(args.gemini_key, "GEMINI_API_KEY", "gemini_api_key", None),
+        target_album_name=resolve(
+            args.target_album_name, "TARGET_ALBUM_NAME", "target_album_name", None
+        ),
+        scorer_type=scorer_type,
+        local_model_id=str(
+            resolve(
+                args.local_model,
+                "LOCAL_MODEL_ID",
+                "local_model_id",
+                "somepago/AestheticSigLIP",
             )
-    elif album_id:
-        album_details = get_album_details(immich_url, api_key, album_id)
-        if album_details:
-            album_name_source = album_details.get("albumName")
-            print(f"Selected Source Album: {album_name_source} (ID: {album_id})")
+        ),
+        gemini_model=str(
+            resolve(args.gemini_model, "GEMINI_MODEL", "gemini_model", "gemini-2.5-flash")
+        ),
+        openai_key=resolve(args.openai_key, "OPENAI_API_KEY", "openai_api_key", None),
+        openai_url=str(
+            resolve(
+                args.openai_url,
+                "OPENAI_BASE_URL",
+                "openai_base_url",
+                "https://api.openai.com/v1",
+            )
+        ),
+        openai_model=str(resolve(args.openai_model, "OPENAI_MODEL", "openai_model", "gpt-4o-mini")),
+        write_ratings=_resolve_bool(args.write_ratings, "write_ratings"),
+        limit=_to_int(resolve(args.limit, "LIMIT", "limit", DEFAULT_LIMIT), DEFAULT_LIMIT),
+        concurrency=_to_int(
+            resolve(args.concurrency, "CONCURRENCY", "concurrency", DEFAULT_CONCURRENCY),
+            DEFAULT_CONCURRENCY,
+        ),
+        delay=_to_float(resolve(args.delay, "DELAY", "delay", default_delay), default_delay),
+        cache_file=str(resolve(args.cache_file, "CACHE_FILE", "cache_file", DEFAULT_CACHE_FILE)),
+        dedup_window=_to_int(resolve(args.dedup_window, "DEDUP_WINDOW", "dedup_window", 0), 0),
+        dry_run=_resolve_bool(args.dry_run, "dry_run"),
+        force_score=_resolve_bool(args.force_score, "force_score"),
+        use_cache_only=_resolve_bool(args.use_cache_only, "use_cache_only"),
+        two_stage=_resolve_bool(args.two_stage, "two_stage"),
+        stage2_top_pct=_to_float(
+            resolve(args.stage2_top_pct, "STAGE2_TOP_PCT", "stage2_top_pct", 15.0), 15.0
+        ),
+        stage2_model=str(
+            resolve(args.stage2_model, "STAGE2_MODEL", "stage2_model", "gemini-2.5-flash")
+        ),
+        stage2_weight=_to_float(
+            resolve(args.stage2_weight, "STAGE2_WEIGHT", "stage2_weight", 0.5), 0.5
+        ),
+    )
+
+
+def _run_parallel_stage(
+    *,
+    stage_num: int,
+    items_to_score: Sequence[dict[str, Any]],
+    concurrency: int,
+    store: EvaluationStore,
+    worker_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    on_success: Callable[[dict[str, Any], Any], None],
+) -> None:
+    failed_count = 0
+    try:
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {executor.submit(worker_fn, item): item for item in items_to_score}
+            pbar = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"Stage {stage_num} Scoring",
+            )
+            for future in pbar:
+                res = future.result()
+                if res["status"] == "success":
+                    on_success(res, pbar)
+                else:
+                    failed_count += 1
+                    pbar.write(
+                        f"Warning: Failed to score asset {res['id']} in Stage {stage_num}: {res['error']}"
+                    )
+    finally:
+        store.flush()
+
+    if failed_count > 0:
+        print(f"\nCompleted Stage {stage_num} with {failed_count} failures.")
+
+
+def _evaluate_stage1_batch(
+    assets: Sequence[dict[str, Any]],
+    cfg: ScorerConfig,
+    gateway: ImmichGateway,
+    store: EvaluationStore,
+    evaluator: ImageEvaluator,
+) -> list[dict[str, Any]]:
+    stage1_results: list[dict[str, Any]] = []
+    assets_to_score: list[dict[str, Any]] = []
+    s1_model_name = evaluator.model_id
+
+    for asset in assets:
+        raw_s1 = store.get_stage1(asset, model_id=s1_model_name, force=cfg.force_score)
+        if raw_s1 is not None:
+            stage1_results.append(
+                {
+                    "id": asset["id"],
+                    "asset": asset,
+                    "raw_score_stage1": float(raw_s1),
+                }
+            )
         else:
-            print(f"Warning: Album ID {album_id} provided but could not fetch details from server.")
+            assets_to_score.append(asset)
+
+    print(f"Stage 1 cached: {len(stage1_results)}")
+    if cfg.use_cache_only:
+        if assets_to_score:
+            print("Running in --use-cache-only mode. Skipping Stage 1 scoring of uncached assets.")
+        return stage1_results
+
+    print(f"Stage 1 needing scoring: {len(assets_to_score)}")
+    if not assets_to_score:
+        return stage1_results
+
+    # Remote vision APIs enforce strict RPM limits; serialize worker threads for non-local scorers
+    concurrency_s1 = 1 if cfg.scorer_type not in ("local", "fake") else max(1, cfg.concurrency)
+    print(
+        f"Starting parallel Stage 1 scoring (using '{s1_model_name}') with {concurrency_s1} worker threads."
+    )
+    if cfg.scorer_type not in ("local", "fake"):
+        print(
+            f"Injecting a {cfg.delay}s delay between requests per thread to respect API rate limits."
+        )
+
+    def _score_one(asset_item: dict[str, Any]) -> dict[str, Any]:
+        asset_id = str(asset_item["id"])
+        try:
+            raw_bytes = gateway.download_thumbnail(asset_id)
+            img_bytes = resize_image_bytes(raw_bytes, max_dim=evaluator.required_max_dimension)
+            eval_res = evaluator.evaluate(img_bytes)
+            store.record_stage1(asset_item, eval_res.raw_score, s1_model_name)
+            if cfg.scorer_type == "local" and cfg.delay > 0:
+                time.sleep(cfg.delay)
+            return {
+                "id": asset_id,
+                "raw_score_stage1": eval_res.raw_score,
+                "asset": asset_item,
+                "status": "success",
+            }
+        except Exception as exc:
+            return {"id": asset_id, "status": "error", "error": str(exc), "asset": asset_item}
+
+    def _on_s1_success(item_res: dict[str, Any], pbar: Any) -> None:
+        stage1_results.append(item_res)
+        filename = item_res["asset"].get("originalFileName") or item_res["id"]
+        pbar.write(
+            f"Stage 1 Scored {COLOR_BLUE}{filename}{COLOR_RESET} using "
+            f"'{COLOR_BOLD}{s1_model_name}{COLOR_RESET}': "
+            f"Raw Score {COLOR_GREEN}{item_res['raw_score_stage1']:.2f}{COLOR_RESET}"
+        )
+
+    _run_parallel_stage(
+        stage_num=1,
+        items_to_score=assets_to_score,
+        concurrency=concurrency_s1,
+        store=store,
+        worker_fn=_score_one,
+        on_success=_on_s1_success,
+    )
+    return stage1_results
+
+
+def _evaluate_stage2_batch(
+    candidates: Sequence[dict[str, Any]],
+    cfg: ScorerConfig,
+    gateway: ImmichGateway,
+    store: EvaluationStore,
+    evaluator: ImageEvaluator,
+) -> None:
+    s2_model_name = evaluator.model_id
+    is_local_s2 = _classify_stage2_provider(s2_model_name) == "local"
+    stage2_type_str = "Technical Quality Evaluation" if is_local_s2 else "Aesthetics Evaluation"
+    print(
+        f"\n--- {COLOR_MAGENTA}Stage 2: {stage2_type_str}{COLOR_RESET} "
+        f"(selecting top {len(candidates)} candidates ({cfg.stage2_top_pct}%) using model '{COLOR_BOLD}{s2_model_name}{COLOR_RESET}') ---"
+    )
+
+    cached_count = 0
+    assets_to_score: list[dict[str, Any]] = []
+    for item in candidates:
+        asset_obj = item.get("asset") or item["id"]
+        raw_s2 = store.get_stage2(asset_obj, model_id=s2_model_name, force=cfg.force_score)
+        if raw_s2 is not None:
+            item["raw_score_stage2"] = float(raw_s2)
+            reason_s2 = store.get_stage2_reason(
+                asset_obj, model_id=s2_model_name, force=cfg.force_score
+            )
+            if reason_s2 is not None:
+                item["reason_stage2"] = reason_s2
+            cached_count += 1
+        else:
+            assets_to_score.append(item)
+
+    print(f"Stage 2 cached: {cached_count}")
+    if cfg.use_cache_only:
+        if assets_to_score:
+            print("Running in --use-cache-only mode. Skipping Stage 2 scoring of uncached assets.")
+        return
+
+    print(f"Stage 2 needing scoring: {len(assets_to_score)}")
+    if not assets_to_score:
+        return
+
+    concurrency_s2 = 1 if not is_local_s2 else max(1, cfg.concurrency)
+    print(
+        f"Starting parallel Stage 2 scoring (using model '{s2_model_name}') with {concurrency_s2} worker threads."
+    )
+
+    def _score_one_s2(cand_item: dict[str, Any]) -> dict[str, Any]:
+        asset_id = str(cand_item["id"])
+        try:
+            raw_bytes = gateway.download_thumbnail(asset_id)
+            img_bytes = resize_image_bytes(raw_bytes, max_dim=evaluator.required_max_dimension)
+            eval_res = evaluator.evaluate(img_bytes)
+            store.record_stage2(
+                cand_item.get("asset") or asset_id,
+                eval_res.raw_score,
+                s2_model_name,
+                reason=eval_res.reason,
+            )
+            return {
+                "id": asset_id,
+                "item": cand_item,
+                "raw_score_stage2": eval_res.raw_score,
+                "reason_stage2": eval_res.reason,
+                "status": "success",
+            }
+        except Exception as exc:
+            return {"id": asset_id, "item": cand_item, "status": "error", "error": str(exc)}
+
+    def _on_s2_success(res: dict[str, Any], pbar: Any) -> None:
+        cand = res["item"]
+        cand["raw_score_stage2"] = res["raw_score_stage2"]
+        cand["reason_stage2"] = res.get("reason_stage2")
+        filename = cand["asset"].get("originalFileName") or cand["id"]
+        pbar.write(
+            f"Stage 2 Scored {COLOR_BLUE}{filename}{COLOR_RESET} using "
+            f"'{COLOR_BOLD}{s2_model_name}{COLOR_RESET}': "
+            f"Raw Score {COLOR_GREEN}{res['raw_score_stage2']:.2f}{COLOR_RESET} | "
+            f"Stage 1 Raw: {COLOR_YELLOW}{cand['raw_score_stage1']:.2f}{COLOR_RESET}"
+        )
+
+    _run_parallel_stage(
+        stage_num=2,
+        items_to_score=assets_to_score,
+        concurrency=concurrency_s2,
+        store=store,
+        worker_fn=_score_one_s2,
+        on_success=_on_s2_success,
+    )
+
+
+def _sync_star_ratings(
+    scored_assets: Sequence[dict[str, Any]],
+    gateway: ImmichGateway,
+    concurrency: int,
+) -> None:
+    print(
+        f"Syncing calibrated star ratings (1-5) to Immich in parallel using {concurrency} threads..."
+    )
+
+    def _update_worker(asset_res: dict[str, Any]) -> bool:
+        try:
+            stars = int(asset_res.get("rating") or score_to_stars(asset_res["score"]))
+            gateway.update_asset_rating(str(asset_res["id"]), stars)
+            return True
+        except Exception as exc:
+            print(f"Warning: Failed to update rating for asset {asset_res['id']}: {exc}")
+            return False
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as rating_executor:
+        rating_futures = [rating_executor.submit(_update_worker, res) for res in scored_assets]
+        for f in tqdm(
+            as_completed(rating_futures),
+            total=len(rating_futures),
+            desc="Syncing Ratings",
+        ):
+            f.result()
+    print("Star ratings sync completed!")
+
+
+def run_scoring_workflow(
+    cfg: ScorerConfig,
+    *,
+    gateway: Optional[ImmichGateway] = None,
+    store: Optional[EvaluationStore] = None,
+    stage1_evaluator: Optional[ImageEvaluator] = None,
+    stage2_evaluator: Optional[ImageEvaluator] = None,
+    pipeline: Optional[ScorePipeline] = None,
+) -> list[dict[str, Any]]:
+    """Coordinates `ImmichGateway`, `EvaluationStore`, `ImageEvaluator`, and `ScorePipeline`.
+
+    Executes Stage 1 (and optional Stage 2) evaluations across a thread pool, atomically
+    flushes intermediate and final calibrated scores to `store`, optionally synchronizes
+    `1–5` star ratings back to Immich (`cfg.write_ratings`), and updates the target
+    highlights album unless `cfg.dry_run` is enabled.
+
+    Args:
+        cfg: Resolved `ScorerConfig` parameters.
+        gateway: Optional pre-configured `ImmichGateway` (constructed from `cfg` if omitted).
+        store: Optional `EvaluationStore` instance (loaded from `cfg.cache_file` if omitted).
+        stage1_evaluator: Optional Stage 1 `ImageEvaluator` (created via factory if omitted).
+        stage2_evaluator: Optional Stage 2 `ImageEvaluator` (created via factory if omitted).
+        pipeline: Optional `ScorePipeline` instance (constructed from `cfg` if omitted).
+
+    Returns:
+        List of top-scoring highlight asset dictionaries up to `cfg.limit`.
+
+    Raises:
+        ValueError: If `gateway` is `None` and `cfg.immich_url` or `cfg.api_key` is missing,
+            or if evaluator initialization fails due to missing API keys.
+        ImmichGatewayError: If asset retrieval or target album synchronization fails.
+    """
+    if gateway is None:
+        if not cfg.immich_url or not cfg.api_key:
+            raise ValueError("immich_url and api_key are required to initialize ImmichGateway")
+        gateway = ImmichGateway(
+            cfg.immich_url,
+            cfg.api_key,
+            pool_maxsize=max(20, cfg.concurrency * 2),
+        )
+
+    if store is None:
+        store = EvaluationStore.from_disk(cfg.cache_file)
+    print(f"Loaded {len(store)} entries from cache file: {cfg.cache_file}")
+
+    assets = gateway.fetch_image_assets(person_id=cfg.person_id, album_id=cfg.album_id)
+    target_label = "person" if cfg.person_id else "album"
+    if not assets:
+        print(f"No image assets found for the specified {target_label}.")
+        return []
+    print(f"Found {len(assets)} total image assets for the {target_label}.")
+
+    rate_limiter = RateLimiter(delay=cfg.delay)
+    if stage1_evaluator is None:
+        stage1_evaluator = create_evaluator(
+            scorer_type=cfg.scorer_type,
+            stage=1,
+            local_model_id=cfg.local_model_id,
+            gemini_key=cfg.gemini_key,
+            gemini_model=cfg.gemini_model,
+            openai_key=cfg.openai_key,
+            openai_url=cfg.openai_url,
+            openai_model=cfg.openai_model,
+            delay=cfg.delay,
+            rate_limiter=rate_limiter,
+        )
+
+    if pipeline is None:
+        pipeline = ScorePipeline(
+            stage2_weight=cfg.stage2_weight,
+            dedup_window=float(cfg.dedup_window),
+        )
+
+    s1_model_id = stage1_evaluator.model_id
+    if cfg.scorer_type == "local":
+        s1_label = f"local model '{COLOR_BOLD}{s1_model_id}{COLOR_RESET}'"
+        stage1_type_str = "Coarse Quality Filtering"
+    elif cfg.scorer_type == "gemini":
+        s1_label = f"Gemini API model '{COLOR_BOLD}{s1_model_id}{COLOR_RESET}'"
+        stage1_type_str = "Aesthetics Evaluation"
     else:
-        # Interactive mode: ask user if they want to process a Person or an existing Album
+        s1_label = f"OpenAI API model '{COLOR_BOLD}{s1_model_id}{COLOR_RESET}'"
+        stage1_type_str = "Aesthetics Evaluation"
+
+    print(f"\n--- {COLOR_CYAN}Stage 1: {stage1_type_str}{COLOR_RESET} (using {s1_label}) ---")
+
+    stage1_results = _evaluate_stage1_batch(assets, cfg, gateway, store, stage1_evaluator)
+    s1_stats = pipeline.calibrate_stage1(stage1_results)
+
+    if not cfg.two_stage:
+        print("\nCalibrating aesthetic scores based on library distribution...")
+        print("Library Statistics:")
+        print(f"  - Total Scored Photos: {len(stage1_results)}")
+        print(f"  - Raw Score Mean: {s1_stats.mean:.3f}")
+        print(f"  - Raw Score Std Dev: {s1_stats.std:.3f}")
+        print("Applying sigmoid normalization and updating cache...")
+
+        scored_assets = pipeline.single_stage_finalize(stage1_results)
+        for item in scored_assets:
+            store.record_final(
+                asset_id=str(item["id"]),
+                score=int(item["score"]),
+                reason=str(item["reason"]),
+                raw_score_stage1=float(item["raw_score_stage1"]),
+                model_id_stage1=stage1_evaluator.model_id,
+                updated_at=get_asset_mod_time(item["asset"]),
+            )
+        store.flush()
+        print("Cache updated successfully!")
+    else:
+        if stage2_evaluator is None:
+            stage2_evaluator = create_evaluator(
+                scorer_type=cfg.scorer_type,
+                stage=2,
+                stage2_model=cfg.stage2_model,
+                gemini_key=cfg.gemini_key,
+                gemini_model=cfg.gemini_model,
+                openai_key=cfg.openai_key,
+                openai_url=cfg.openai_url,
+                openai_model=cfg.openai_model,
+                delay=cfg.delay,
+                rate_limiter=rate_limiter,
+            )
+
+        candidates_for_stage2, _ = pipeline.split_candidates(
+            stage1_results, top_pct=cfg.stage2_top_pct
+        )
+        _evaluate_stage2_batch(candidates_for_stage2, cfg, gateway, store, stage2_evaluator)
+
+        print(
+            f"\nCombining Stage 1 ({stage1_evaluator.model_id}) and "
+            f"Stage 2 ({stage2_evaluator.model_id}) scores..."
+        )
+        scored_assets = pipeline.fuse_stage2(stage1_results)
+        s2_stats = pipeline.s2_stats
+        if s2_stats is not None:
+            print("Stage 2 Statistics:")
+            print(f"  - Total Scored Candidates: {len(scored_assets)}")
+            print(f"  - Raw Score Mean: {s2_stats.mean:.3f}")
+            print(f"  - Raw Score Std Dev: {s2_stats.std:.3f}")
+
+        for item in scored_assets:
+            raw_s2_val = item.get("raw_score_stage2")
+            store.record_final(
+                asset_id=str(item["id"]),
+                score=int(item["score"]),
+                reason=str(item["reason"]),
+                raw_score_stage1=float(item["raw_score_stage1"]),
+                model_id_stage1=stage1_evaluator.model_id,
+                raw_score_stage2=float(raw_s2_val) if raw_s2_val is not None else None,
+                model_id_stage2=stage2_evaluator.model_id if raw_s2_val is not None else None,
+                reason_stage2=item.get("reason_stage2"),
+                updated_at=get_asset_mod_time(item["asset"]),
+            )
+        store.flush()
+        print("Cache updated successfully with combined scores!")
+
+    if cfg.write_ratings:
+        _sync_star_ratings(scored_assets, gateway, cfg.concurrency)
+
+    if cfg.dedup_window > 0:
+        print(f"\nDeduplicating burst photos within a {cfg.dedup_window}-second window...")
+        original_count = len(scored_assets)
+        scored_assets = pipeline.deduplicate(scored_assets, dedup_window=float(cfg.dedup_window))
+        print(
+            f"Deduplicated burst photos: Kept {len(scored_assets)} unique highlights out of "
+            f"{original_count} scored photos (Filtered out {original_count - len(scored_assets)} burst duplicates)."
+        )
+
+    scored_assets.sort(key=lambda x: x["score"], reverse=True)
+
+    print("\n--- TOP 10 HIGHEST SCORING IMAGES ---")
+    for idx, item in enumerate(scored_assets[:10], 1):
+        asset_info = item["asset"]
+        orig_name = asset_info.get("originalFileName", "Unknown")
+        created_at = str(asset_info.get("fileCreatedAt", "Unknown Date"))[:10]
+        print(
+            f"{idx:2d}. Score: {item['score']:3d} | File: {orig_name} ({created_at}) | Reason: {item['reason']}"
+        )
+
+    limit = min(cfg.limit, len(scored_assets))
+    top_assets = scored_assets[:limit]
+    print(
+        f"\nSelecting the {limit} highest scoring images (Minimum score in top selection: "
+        f"{top_assets[-1]['score'] if top_assets else 0})."
+    )
+
+    if cfg.dry_run:
+        print("\n[Dry Run] skipping album creation and asset addition.")
+        return top_assets
+
+    if cfg.target_album_name:
+        top_ids = [str(item["id"]) for item in top_assets]
+        gateway.ensure_album_with_assets(cfg.target_album_name, top_ids)
+        print(
+            f"\nSuccess! Successfully added the top {len(top_ids)} photos to album '{cfg.target_album_name}'."
+        )
+
+    return top_assets
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """CLI entrypoint coordinating interactive credential resolution and the scoring workflow."""
+    cfg = resolve_config(argv=argv)
+
+    print("Welcome to Immich Aesthetic Scorer!")
+    if not cfg.immich_url:
+        cfg.immich_url = get_or_prompt(
+            "IMMICH_URL", "Enter Immich Server URL", default="http://localhost:2283"
+        ).rstrip("/")
+    if not cfg.api_key:
+        cfg.api_key = get_or_prompt("IMMICH_API_KEY", "Enter Immich API Key", secret=True)
+
+    gateway = ImmichGateway(
+        cfg.immich_url,
+        cfg.api_key,
+        pool_maxsize=max(20, cfg.concurrency * 2),
+    )
+
+    print("Verifying connection to Immich...")
+    try:
+        version = gateway.verify_connection()
+        print(f"Connected successfully! Immich Server Version: {version.major}.{version.minor}")
+    except ImmichGatewayError as exc:
+        print(f"Error: Could not connect to Immich at {cfg.immich_url}. Error: {exc}")
+        sys.exit(1)
+
+    person_name: Optional[str] = None
+    album_name_source: Optional[str] = None
+
+    if cfg.person_id:
+        try:
+            person_details = gateway.get_person_details(cfg.person_id)
+            person_name = person_details.get("name")
+            print(f"Selected Person: {person_name or 'Unnamed'} (ID: {cfg.person_id})")
+        except ImmichGatewayError:
+            print(
+                f"Warning: Person ID {cfg.person_id} provided but could not fetch details from server."
+            )
+    elif cfg.album_id:
+        try:
+            album_details = gateway.get_album_details(cfg.album_id)
+            album_name_source = album_details.get("albumName")
+            print(f"Selected Source Album: {album_name_source} (ID: {cfg.album_id})")
+        except ImmichGatewayError:
+            print(
+                f"Warning: Album ID {cfg.album_id} provided but could not fetch details from server."
+            )
+    else:
         print("\n--- Target Selection ---")
         print(" [1] Process photos of a Person (from facial recognition)")
         print(" [2] Process photos from an existing Album")
         target_choice = input("Select option [1-2, default: 1]: ").strip()
         if target_choice == "2":
-            album_id, album_name_source = select_album_interactive(immich_url, api_key)
+            cfg.album_id, album_name_source = select_album_interactive(cfg.immich_url, cfg.api_key)
         else:
-            person_id, person_name = select_person_interactive(immich_url, api_key)
+            cfg.person_id, person_name = select_person_interactive(cfg.immich_url, cfg.api_key)
 
-    if not person_id and not album_id:
+    if not cfg.person_id and not cfg.album_id:
         print("Error: No person or album selected. Exiting.")
         sys.exit(1)
 
-    # Resolve Remote Keys depending on scorer_type or stage2_model
-    need_gemini = (scorer_type == "gemini") or ("gemini" in stage2_model.lower())
-    need_openai = (scorer_type == "openai") or (
-        "openai" in stage2_model.lower() or "gpt" in stage2_model.lower()
-    )
+    s2_provider = _classify_stage2_provider(cfg.stage2_model) if cfg.two_stage else "none"
+    need_gemini = (cfg.scorer_type == "gemini") or (s2_provider == "gemini")
+    need_openai = (cfg.scorer_type == "openai") or (s2_provider == "openai")
+    if need_gemini and not cfg.gemini_key:
+        cfg.gemini_key = get_or_prompt(
+            "GEMINI_API_KEY",
+            "Enter Google Gemini API Key",
+            secret=True,
+            default=DEFAULT_GEMINI_KEY,
+        )
+    if need_openai and not cfg.openai_key:
+        cfg.openai_key = get_or_prompt(
+            "OPENAI_API_KEY", "Enter OpenAI (or compatible) API Key", secret=True
+        )
 
-    if need_gemini:
-        if not gemini_key:
-            # Fallback to default developer key from system memory if available, otherwise ask user
-            gemini_key = get_or_prompt(
-                "GEMINI_API_KEY",
-                "Enter Google Gemini API Key",
-                secret=True,
-                default=DEFAULT_GEMINI_KEY,
-            )
-    if need_openai:
-        if not openai_key:
-            openai_key = get_or_prompt(
-                "OPENAI_API_KEY", "Enter OpenAI (or compatible) API Key", secret=True
-            )
-
-    # Resolve Target Album Name
-    if not target_album_name:
-        if person_id:
+    if not cfg.target_album_name:
+        if cfg.person_id:
             default_album = (
-                f"Best of {person_name}" if person_name else f"Best of Person {person_id[:8]}"
+                f"Best of {person_name}" if person_name else f"Best of Person {cfg.person_id[:8]}"
             )
         else:
             default_album = (
                 f"Best of Album {album_name_source}"
                 if album_name_source
-                else f"Best of Album {album_id[:8]}"
-                if album_id
+                else f"Best of Album {cfg.album_id[:8]}"
+                if cfg.album_id
                 else "Best of Album"
             )
-        target_album_name = input(f"Enter target album name [{default_album}]: ").strip()
-        if not target_album_name:
-            target_album_name = default_album
-
-    # Load Cache
-    cache = load_cache(cache_file)
-    print(f"Loaded {len(cache)} entries from cache file: {cache_file}")
-
-    # Fetch all assets
-    assets = fetch_all_image_assets(immich_url, api_key, person_id=person_id, album_id=album_id)
-    target_label = "person" if person_id else "album"
-    if not assets:
-        print(f"No image assets found for the specified {target_label}.")
-        sys.exit(0)
-    print(f"Found {len(assets)} total image assets for the {target_label}.")
-
-    # Identify Stage 1 model representation string
-    if scorer_type == "local":
-        s1_model_str = f"local model '{local_model_id}'"
-        s1_model_name = local_model_id
-    elif scorer_type == "gemini":
-        s1_model_str = f"Gemini API model '{gemini_model}'"
-        s1_model_name = gemini_model
-    else:
-        s1_model_str = f"OpenAI API model '{openai_model}'"
-        s1_model_name = openai_model
-
-    stage1_type_str = (
-        "Coarse Quality Filtering" if scorer_type == "local" else "Aesthetics Evaluation"
-    )
-    print(
-        f"\n--- {COLOR_CYAN}Stage 1: {stage1_type_str}{COLOR_RESET} (using {COLOR_BOLD}{s1_model_str}{COLOR_RESET}) ---"
-    )
-
-    # Phase 1: Retrieve/Compute Stage 1 scores for all assets
-    # We will build a list of dicts: {'id': asset_id, 'asset': asset, 'raw_score_stage1': ...}
-    stage1_results = []
-    assets_to_score_s1 = []
-
-    for asset in assets:
-        asset_id = asset["id"]
-        cached_entry = cache.get(asset_id)
-        mod_time = get_asset_mod_time(asset)
-
-        # Check if the cached model matches the current model
-        cached_model_s1 = cached_entry.get("model_id_stage1") if cached_entry else None
-        model_mismatch = cached_model_s1 is not None and cached_model_s1 != s1_model_name
-
-        if (
-            not force_score
-            and cached_entry
-            and not model_mismatch
-            and (
-                "raw_score_stage1" in cached_entry
-                or "raw_score" in cached_entry
-                or "score" in cached_entry
-            )
-        ):
-            cached_mod = cached_entry.get("updatedAt")
-            if not cached_mod or cached_mod == mod_time:
-                raw_s1 = cached_entry.get("raw_score_stage1")
-                if raw_s1 is None:
-                    raw_s1 = cached_entry.get("raw_score")
-                if raw_s1 is None:
-                    raw_s1 = extract_raw_score_from_reason(cached_entry.get("reason", ""))
-
-                if raw_s1 is not None:
-                    stage1_results.append(
-                        {
-                            "id": asset_id,
-                            "asset": asset,
-                            "raw_score_stage1": float(raw_s1),
-                        }
-                    )
-                    continue
-
-        assets_to_score_s1.append(asset)
-
-    print(f"Stage 1 cached: {len(stage1_results)}")
-    if use_cache_only:
-        if assets_to_score_s1:
-            print("Running in --use-cache-only mode. Skipping Stage 1 scoring of uncached assets.")
-            assets_to_score_s1 = []
-    else:
-        print(f"Stage 1 needing scoring: {len(assets_to_score_s1)}")
-
-    if assets_to_score_s1:
-        concurrency_s1 = 1 if scorer_type != "local" else concurrency
-        print(
-            f"Starting parallel Stage 1 scoring (using {s1_model_str}) with {concurrency_s1} worker threads."
-        )
-        if scorer_type != "local":
-            print(
-                f"Injecting a {delay}s delay between requests per thread to respect API rate limits."
-            )
-
-        def process_s1_asset(asset_item):
-            global last_gemini_call_time
-            asset_id = asset_item["id"]
-            try:
-                # Download thumbnail (regular size: 512px)
-                img_bytes = download_thumbnail(immich_url, api_key, asset_id, max_dim=512)
-
-                if scorer_type == "local":
-                    score_res = score_image_local(img_bytes, local_model_id)
-                else:
-                    with gemini_call_lock:
-                        elapsed = time.time() - last_gemini_call_time
-                        needed_delay = delay if delay is not None else 4.0
-                        sleep_time = max(0.0, needed_delay - elapsed)
-                        last_gemini_call_time = time.time() + sleep_time
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-
-                    if scorer_type == "gemini":
-                        score_res = call_gemini_api(gemini_key, img_bytes, model_name=gemini_model)
-                    else:
-                        score_res = call_openai_api(openai_key, openai_url, openai_model, img_bytes)
-
-                raw_s1 = score_res.get("raw_score")
-                if raw_s1 is None:
-                    raw_s1 = float(score_res.get("score", 0)) / 10.0
-
-                # Save to cache
-                mod_time = get_asset_mod_time(asset_item)
-                cache_entry = cache.get(asset_id, {})
-                cache_entry.update(
-                    {
-                        "raw_score_stage1": raw_s1,
-                        "model_id_stage1": s1_model_name,
-                        "updatedAt": mod_time,
-                    }
-                )
-                update_cache_entry_threadsafe(asset_id, cache_entry)
-
-                if scorer_type == "local" and delay > 0:
-                    time.sleep(delay)
-
-                return {
-                    "id": asset_id,
-                    "raw_score_stage1": raw_s1,
-                    "asset": asset_item,
-                    "status": "success",
-                }
-            except Exception as e:
-                return {"id": asset_id, "status": "error", "error": str(e), "asset": asset_item}
-
-        def update_cache_entry_threadsafe(key, val):
-            with cache_lock:
-                cache[key] = val
-
-        failed_count_s1 = 0
         try:
-            with ThreadPoolExecutor(max_workers=concurrency_s1) as executor:
-                futures = {
-                    executor.submit(process_s1_asset, item): item for item in assets_to_score_s1
-                }
-                pbar = tqdm(as_completed(futures), total=len(futures), desc="Stage 1 Scoring")
-                for future in pbar:
-                    item_res = future.result()
-                    if item_res["status"] == "success":
-                        stage1_results.append(item_res)
-                        filename = item_res["asset"].get("originalFileName") or item_res["id"]
-                        pbar.write(
-                            f"Stage 1 Scored {COLOR_BLUE}{filename}{COLOR_RESET} using '{COLOR_BOLD}{s1_model_name}{COLOR_RESET}': Raw Score {COLOR_GREEN}{item_res['raw_score_stage1']:.2f}{COLOR_RESET}"
-                        )
-                    else:
-                        failed_count_s1 += 1
-                        pbar.write(
-                            f"Warning: Failed to score asset {item_res['id']} in Stage 1: {item_res['error']}"
-                        )
-        finally:
-            save_cache(cache, cache_file)
+            user_album = input(f"Enter target album name [{default_album}]: ").strip()
+        except (EOFError, OSError):
+            user_album = ""
+        cfg.target_album_name = user_album or default_album
 
-        if failed_count_s1 > 0:
-            print(f"\nCompleted Stage 1 with {failed_count_s1} failures.")
-
-    # Calculate normalized Stage 1 scores
-    raw_s1_list = [
-        item["raw_score_stage1"]
-        for item in stage1_results
-        if item.get("raw_score_stage1") is not None
-    ]
-    if len(raw_s1_list) > 1:
-        mean_s1 = sum(raw_s1_list) / len(raw_s1_list)
-        variance_s1 = sum((x - mean_s1) ** 2 for x in raw_s1_list) / len(raw_s1_list)
-        std_s1 = math.sqrt(variance_s1)
-        if std_s1 < 1.0:
-            std_s1 = 1.0
-    else:
-        mean_s1 = 6.0
-        std_s1 = 1.0
-
-    for item in stage1_results:
-        raw_s1 = item["raw_score_stage1"]
-        z1 = (raw_s1 - mean_s1) / std_s1
-        s1_norm = 100.0 / (1.0 + math.exp(-1.5 * z1))
-        item["s1_norm"] = min(100.0, max(0.0, s1_norm))
-
-    scored_assets = []
-
-    if not two_stage:
-        # Single-stage path: use Stage 1 normalized score as final score
-        print("\nCalibrating aesthetic scores based on library distribution...")
-        print("Library Statistics:")
-        print(f"  - Total Scored Photos: {len(raw_s1_list)}")
-        print(f"  - Raw Score Mean: {mean_s1:.3f}")
-        print(f"  - Raw Score Std Dev: {std_s1:.3f}")
-        print("Applying sigmoid normalization and updating cache...")
-
-        # Re-read cache to update it on disk
-        cache = load_cache(cache_file)
-        for item in stage1_results:
-            raw_s1 = item["raw_score_stage1"]
-            z1 = (raw_s1 - mean_s1) / std_s1
-            final_score = int(round(item["s1_norm"]))
-            reason = f"Local CLIP score: {raw_s1:.2f}/10.0 (z-score: {z1:.2f})"
-
-            # Update cache entry
-            asset_id = item["id"]
-            cache_entry = cache.get(asset_id, {})
-            cache_entry.update(
-                {
-                    "score": final_score,
-                    "raw_score_stage1": raw_s1,
-                    "model_id_stage1": s1_model_name,
-                    "reason": reason,
-                }
-            )
-            cache[asset_id] = cache_entry
-
-            scored_assets.append(
-                {
-                    "id": asset_id,
-                    "score": final_score,
-                    "reason": reason,
-                    "asset": item["asset"],
-                }
-            )
-        save_cache(cache, cache_file)
-        print("Cache updated successfully!")
-
-    else:
-        # Compute stage2_top_n dynamically as a percentage of the total Stage 1 results
-        stage2_top_n = max(1, int(len(stage1_results) * (stage2_top_pct / 100.0)))
-
-        # Two-stage path: score top candidates with Stage 2 model, then combine
-        is_local_s2 = not (
-            "gemini" in stage2_model.lower()
-            or "openai" in stage2_model.lower()
-            or "gpt" in stage2_model.lower()
-        )
-        stage2_type_str = "Technical Quality Evaluation" if is_local_s2 else "Aesthetics Evaluation"
-        print(
-            f"\n--- {COLOR_MAGENTA}Stage 2: {stage2_type_str}{COLOR_RESET} (selecting top {stage2_top_n} candidates ({stage2_top_pct}%) using model '{COLOR_BOLD}{stage2_model}{COLOR_RESET}') ---"
-        )
-        stage1_results.sort(key=lambda x: x["s1_norm"], reverse=True)
-        candidates_for_stage2 = stage1_results[:stage2_top_n]
-
-        stage2_results = []
-        assets_to_score_s2 = []
-
-        cache = load_cache(cache_file)
-        for item in candidates_for_stage2:
-            asset_id = item["id"]
-            cached_entry = cache.get(asset_id)
-
-            # Check if cached Stage 2 model matches the current configured model
-            cached_model_s2 = cached_entry.get("model_id_stage2") if cached_entry else None
-            model_mismatch_s2 = cached_model_s2 is not None and cached_model_s2 != stage2_model
-
-            if (
-                not force_score
-                and cached_entry
-                and not model_mismatch_s2
-                and "raw_score_stage2" in cached_entry
-            ):
-                raw_s2 = cached_entry["raw_score_stage2"]
-                if raw_s2 is not None:
-                    item["raw_score_stage2"] = float(raw_s2)
-                    if "reason_stage2" in cached_entry:
-                        item["reason_stage2"] = cached_entry["reason_stage2"]
-                    stage2_results.append(item)
-                    continue
-
-            assets_to_score_s2.append(item)
-
-        print(f"Stage 2 cached: {len(stage2_results)}")
-        if use_cache_only:
-            if assets_to_score_s2:
-                print(
-                    "Running in --use-cache-only mode. Skipping Stage 2 scoring of uncached assets."
-                )
-                assets_to_score_s2 = []
-        else:
-            print(f"Stage 2 needing scoring: {len(assets_to_score_s2)}")
-
-        if assets_to_score_s2:
-            is_local_s2 = not (
-                "gemini" in stage2_model.lower()
-                or "openai" in stage2_model.lower()
-                or "gpt" in stage2_model.lower()
-            )
-            concurrency_s2 = 1 if not is_local_s2 else concurrency
-            print(
-                f"Starting parallel Stage 2 scoring (using model '{stage2_model}') with {concurrency_s2} worker threads."
-            )
-
-            def process_s2_asset(item):
-                global last_gemini_call_time
-                asset_id = item["id"]
-                try:
-                    # For non-local models (Gemini/OpenAI), download/downscale to 512px thumbnail to save costs.
-                    # For local models, download full high-res preview thumbnail (max_dim=None).
-                    is_local_s2 = not (
-                        "gemini" in stage2_model.lower()
-                        or "openai" in stage2_model.lower()
-                        or "gpt" in stage2_model.lower()
-                    )
-                    max_dim_s2 = None if is_local_s2 else 512
-                    img_bytes = download_thumbnail(
-                        immich_url, api_key, asset_id, max_dim=max_dim_s2
-                    )
-
-                    if not is_local_s2:
-                        with gemini_call_lock:
-                            elapsed = time.time() - last_gemini_call_time
-                            needed_delay = delay if delay is not None else 4.0
-                            sleep_time = max(0.0, needed_delay - elapsed)
-                            last_gemini_call_time = time.time() + sleep_time
-                        if sleep_time > 0:
-                            time.sleep(sleep_time)
-
-                    # Score using Stage 2 model (like MUSIQ)
-                    score_res = score_image_stage2(
-                        img_bytes,
-                        stage2_model,
-                        gemini_key=gemini_key,
-                        gemini_model=gemini_model,
-                        openai_key=openai_key,
-                        openai_url=openai_url,
-                        openai_model=openai_model,
-                    )
-                    raw_s2 = score_res["raw_score"]
-                    reason_s2 = score_res.get("reason")
-
-                    # Save to cache
-                    cache_entry = cache.get(asset_id, {})
-                    cache_entry.update(
-                        {
-                            "raw_score_stage2": raw_s2,
-                            "model_id_stage2": stage2_model,
-                            "reason_stage2": reason_s2,
-                        }
-                    )
-                    with cache_lock:
-                        cache[asset_id] = cache_entry
-
-                    return {
-                        "id": asset_id,
-                        "raw_score_stage1": item["raw_score_stage1"],
-                        "raw_score_stage2": raw_s2,
-                        "reason_stage2": reason_s2,
-                        "status": "success",
-                    }
-                except Exception as e:
-                    return {"id": asset_id, "status": "error", "error": str(e)}
-
-            failed_count_s2 = 0
-            try:
-                with ThreadPoolExecutor(max_workers=concurrency_s2) as executor:
-                    futures = {
-                        executor.submit(process_s2_asset, item): item for item in assets_to_score_s2
-                    }
-                    pbar = tqdm(as_completed(futures), total=len(futures), desc="Stage 2 Scoring")
-                    for future in pbar:
-                        item_res = future.result()
-                        if item_res["status"] == "success":
-                            # Update the item in candidates_for_stage2
-                            for c in candidates_for_stage2:
-                                if c["id"] == item_res["id"]:
-                                    c["raw_score_stage2"] = item_res["raw_score_stage2"]
-                                    c["reason_stage2"] = item_res.get("reason_stage2")
-                                    stage2_results.append(c)
-                                    break
-                            filename = c["asset"].get("originalFileName") or c["id"]
-                            pbar.write(
-                                f"Stage 2 Scored {COLOR_BLUE}{filename}{COLOR_RESET} using '{COLOR_BOLD}{stage2_model}{COLOR_RESET}': Raw Score {COLOR_GREEN}{item_res['raw_score_stage2']:.2f}{COLOR_RESET} | Stage 1 Raw: {COLOR_YELLOW}{item_res['raw_score_stage1']:.2f}{COLOR_RESET}"
-                            )
-                        else:
-                            failed_count_s2 += 1
-                            pbar.write(
-                                f"Warning: Failed to score asset {item_res['id']} in Stage 2: {item_res['error']}"
-                            )
-            finally:
-                save_cache(cache, cache_file)
-
-            if failed_count_s2 > 0:
-                print(f"\nCompleted Stage 2 with {failed_count_s2} failures.")
-
-        # Calculate normalized Stage 2 scores over all successfully scored candidates
-        raw_s2_list = [
-            item["raw_score_stage2"]
-            for item in stage2_results
-            if item.get("raw_score_stage2") is not None
-        ]
-        if len(raw_s2_list) > 1:
-            mean_s2 = sum(raw_s2_list) / len(raw_s2_list)
-            variance_s2 = sum((x - mean_s2) ** 2 for x in raw_s2_list) / len(raw_s2_list)
-            std_s2 = math.sqrt(variance_s2)
-            if std_s2 < 0.01:
-                std_s2 = 1.0
-        else:
-            mean_s2 = 50.0
-            std_s2 = 10.0
-
-        print("Stage 2 Statistics:")
-        print(f"  - Total Scored Candidates: {len(raw_s2_list)}")
-        print(f"  - Raw Score Mean: {mean_s2:.3f}")
-        print(f"  - Raw Score Std Dev: {std_s2:.3f}")
-
-        # Combine Stage 1 & Stage 2 scores
-        stage1_desc = "Technical Quality" if scorer_type == "local" else "Aesthetic"
-        stage2_desc = "Technical Quality" if is_local_s2 else "Aesthetic"
-        print(f"Combining Stage 1 ({stage1_desc}) and Stage 2 ({stage2_desc}) scores...")
-        cache = load_cache(cache_file)
-
-        for item in stage1_results:
-            asset_id = item["id"]
-            raw_s1 = item["raw_score_stage1"]
-            s1_norm = item["s1_norm"]
-
-            if "raw_score_stage2" in item:
-                raw_s2 = item["raw_score_stage2"]
-                z2 = (raw_s2 - mean_s2) / std_s2
-                s2_norm = 100.0 / (1.0 + math.exp(-1.5 * z2))
-                s2_norm = min(100.0, max(0.0, s2_norm))
-
-                combined_score = (1.0 - stage2_weight) * s1_norm + stage2_weight * s2_norm
-                final_score = int(round(combined_score))
-
-                z1 = (raw_s1 - mean_s1) / std_s1
-                reason = (
-                    f"Two-stage: S1={s1_norm:.1f} (raw: {raw_s1:.2f}, z: {z1:.2f}), "
-                    f"S2={s2_norm:.1f} (raw: {raw_s2:.2f}, z: {z2:.2f})"
-                )
-            else:
-                # Assume average technical quality (S2 = 50.0) for non-candidates
-                combined_score = (1.0 - stage2_weight) * s1_norm + stage2_weight * 50.0
-                final_score = int(round(combined_score))
-                reason = f"Stage 1 only: Aesthetics={s1_norm:.1f} (raw: {raw_s1:.2f}, assumed average S2)"
-                raw_s2 = None
-
-            # Update cache entry
-            cache_entry = cache.get(asset_id, {})
-            reason_s2 = item.get("reason_stage2") or cache_entry.get("reason_stage2")
-            cache_entry.update(
-                {
-                    "score": final_score,
-                    "raw_score_stage1": raw_s1,
-                    "model_id_stage1": s1_model_name,
-                    "raw_score_stage2": raw_s2,
-                    "model_id_stage2": stage2_model if raw_s2 is not None else None,
-                    "reason_stage2": reason_s2,
-                    "reason": reason,
-                }
-            )
-            cache[asset_id] = cache_entry
-
-            scored_assets.append(
-                {
-                    "id": asset_id,
-                    "score": final_score,
-                    "reason": reason,
-                    "asset": item["asset"],
-                }
-            )
-
-        save_cache(cache, cache_file)
-        print("Cache updated successfully with combined scores!")
-
-    # Update star ratings in Immich in parallel if requested
-    if write_ratings:
-        print(
-            f"Syncing calibrated star ratings (1-5) to Immich in parallel using {concurrency} threads..."
-        )
-
-        def update_rating_worker(asset_res):
-            try:
-                stars = score_to_stars(asset_res["score"])
-                update_asset_rating(immich_url, api_key, asset_res["id"], stars)
-                return True
-            except Exception as e:
-                print(f"Warning: Failed to update rating for asset {asset_res['id']}: {e}")
-                return False
-
-        with ThreadPoolExecutor(max_workers=concurrency) as rating_executor:
-            rating_futures = [
-                rating_executor.submit(update_rating_worker, res) for res in scored_assets
-            ]
-            rating_pbar = tqdm(
-                as_completed(rating_futures),
-                total=len(rating_futures),
-                desc="Syncing Ratings",
-            )
-            for f in rating_pbar:
-                f.result()
-        print("Star ratings sync completed!")
-
-    # Deduplicate burst photos if window is configured
-    if dedup_window > 0:
-        print(f"\nDeduplicating burst photos within a {dedup_window}-second window...")
-        original_count = len(scored_assets)
-        scored_assets = deduplicate_bursts(scored_assets, dedup_window)
-        print(
-            f"Deduplicated burst photos: Kept {len(scored_assets)} unique highlights out of {original_count} scored photos (Filtered out {original_count - len(scored_assets)} burst duplicates)."
-        )
-
-    # Sort assets by score descending
-    scored_assets.sort(key=lambda x: x["score"], reverse=True)
-
-    # Display top 10 scoring images
-    print("\n--- TOP 10 HIGHEST SCORING IMAGES ---")
-    for idx, item in enumerate(scored_assets[:10], 1):
-        asset_info = item["asset"]
-        orig_name = asset_info.get("originalFileName", "Unknown")
-        created_at = asset_info.get("fileCreatedAt", "Unknown Date")[:10]
-        print(
-            f"{idx:2d}. Score: {item['score']:3d} | File: {orig_name} ({created_at}) | Reason: {item['reason']}"
-        )
-
-    # Get top 100 (or specified limit)
-    limit = min(limit, len(scored_assets))
-    top_assets = scored_assets[:limit]
-
-    print(
-        f"\nSelecting the {limit} highest scoring images (Minimum score in top selection: {top_assets[-1]['score'] if top_assets else 0})."
-    )
-
-    if dry_run:
-        print("\n[Dry Run] skipping album creation and asset addition.")
-        sys.exit(0)
-
-    # Add to album
     try:
-        album_id_target = get_or_create_album(immich_url, api_key, target_album_name)
-        top_ids = [item["id"] for item in top_assets]
-        add_assets_to_album(immich_url, api_key, album_id_target, top_ids)
-        print(
-            f"\nSuccess! Successfully added the top {len(top_ids)} photos to album '{target_album_name}'."
-        )
-    except Exception as e:
-        print(f"\nError managing album/assets: {e}")
+        run_scoring_workflow(cfg, gateway=gateway)
+    except ImmichGatewayError as exc:
+        print(f"\nError communicating with Immich: {exc}")
         sys.exit(1)
 
 
