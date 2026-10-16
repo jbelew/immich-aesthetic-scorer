@@ -12,12 +12,11 @@ import json
 import logging
 import os
 import sys
-import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from getpass import getpass
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import requests
 from tqdm import tqdm
@@ -26,7 +25,6 @@ from immich_aesthetic_scorer.evaluators import (
     ImageEvaluator,
     RateLimiter,
     create_evaluator,
-    resize_image_bytes,
 )
 from immich_aesthetic_scorer.gateway import (
     ImmichGateway,
@@ -38,7 +36,6 @@ from immich_aesthetic_scorer.pipeline import (
 )
 from immich_aesthetic_scorer.store import (
     EvaluationStore,
-    get_asset_mod_time,
 )
 
 # Suppress Hugging Face hub telemetry/symlinks warnings and other log noises
@@ -454,212 +451,6 @@ def resolve_config(
     )
 
 
-def _run_parallel_stage(
-    *,
-    stage_num: int,
-    items_to_score: Sequence[dict[str, Any]],
-    concurrency: int,
-    store: EvaluationStore,
-    worker_fn: Callable[[dict[str, Any]], dict[str, Any]],
-    on_success: Callable[[dict[str, Any], Any], None],
-) -> None:
-    failed_count = 0
-    try:
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {executor.submit(worker_fn, item): item for item in items_to_score}
-            pbar = tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc=f"Stage {stage_num} Scoring",
-            )
-            for future in pbar:
-                res = future.result()
-                if res["status"] == "success":
-                    on_success(res, pbar)
-                else:
-                    failed_count += 1
-                    pbar.write(
-                        f"Warning: Failed to score asset {res['id']} in Stage {stage_num}: {res['error']}"
-                    )
-    finally:
-        store.flush()
-
-    if failed_count > 0:
-        print(f"\nCompleted Stage {stage_num} with {failed_count} failures.")
-
-
-def _evaluate_stage1_batch(
-    assets: Sequence[dict[str, Any]],
-    cfg: ScorerConfig,
-    gateway: ImmichGateway,
-    store: EvaluationStore,
-    evaluator: ImageEvaluator,
-) -> list[dict[str, Any]]:
-    stage1_results: list[dict[str, Any]] = []
-    assets_to_score: list[dict[str, Any]] = []
-    s1_model_name = evaluator.model_id
-
-    for asset in assets:
-        raw_s1 = store.get_stage1(asset, model_id=s1_model_name, force=cfg.force_score)
-        if raw_s1 is not None:
-            stage1_results.append(
-                {
-                    "id": asset["id"],
-                    "asset": asset,
-                    "raw_score_stage1": float(raw_s1),
-                }
-            )
-        else:
-            assets_to_score.append(asset)
-
-    print(f"Stage 1 cached: {len(stage1_results)}")
-    if cfg.use_cache_only:
-        if assets_to_score:
-            print("Running in --use-cache-only mode. Skipping Stage 1 scoring of uncached assets.")
-        return stage1_results
-
-    print(f"Stage 1 needing scoring: {len(assets_to_score)}")
-    if not assets_to_score:
-        return stage1_results
-
-    # Remote vision APIs enforce strict RPM limits; serialize worker threads for non-local scorers
-    concurrency_s1 = 1 if cfg.scorer_type not in ("local", "fake") else max(1, cfg.concurrency)
-    print(
-        f"Starting parallel Stage 1 scoring (using '{s1_model_name}') with {concurrency_s1} worker threads."
-    )
-    if cfg.scorer_type not in ("local", "fake"):
-        print(
-            f"Injecting a {cfg.delay}s delay between requests per thread to respect API rate limits."
-        )
-
-    def _score_one(asset_item: dict[str, Any]) -> dict[str, Any]:
-        asset_id = str(asset_item["id"])
-        try:
-            raw_bytes = gateway.download_thumbnail(asset_id)
-            img_bytes = resize_image_bytes(raw_bytes, max_dim=evaluator.required_max_dimension)
-            eval_res = evaluator.evaluate(img_bytes)
-            store.record_stage1(asset_item, eval_res.raw_score, s1_model_name)
-            if cfg.scorer_type == "local" and cfg.delay > 0:
-                time.sleep(cfg.delay)
-            return {
-                "id": asset_id,
-                "raw_score_stage1": eval_res.raw_score,
-                "asset": asset_item,
-                "status": "success",
-            }
-        except Exception as exc:
-            return {"id": asset_id, "status": "error", "error": str(exc), "asset": asset_item}
-
-    def _on_s1_success(item_res: dict[str, Any], pbar: Any) -> None:
-        stage1_results.append(item_res)
-        filename = item_res["asset"].get("originalFileName") or item_res["id"]
-        pbar.write(
-            f"Stage 1 Scored {COLOR_BLUE}{filename}{COLOR_RESET} using "
-            f"'{COLOR_BOLD}{s1_model_name}{COLOR_RESET}': "
-            f"Raw Score {COLOR_GREEN}{item_res['raw_score_stage1']:.2f}{COLOR_RESET}"
-        )
-
-    _run_parallel_stage(
-        stage_num=1,
-        items_to_score=assets_to_score,
-        concurrency=concurrency_s1,
-        store=store,
-        worker_fn=_score_one,
-        on_success=_on_s1_success,
-    )
-    return stage1_results
-
-
-def _evaluate_stage2_batch(
-    candidates: Sequence[dict[str, Any]],
-    cfg: ScorerConfig,
-    gateway: ImmichGateway,
-    store: EvaluationStore,
-    evaluator: ImageEvaluator,
-) -> None:
-    s2_model_name = evaluator.model_id
-    is_local_s2 = _classify_stage2_provider(s2_model_name) == "local"
-    stage2_type_str = "Technical Quality Evaluation" if is_local_s2 else "Aesthetics Evaluation"
-    print(
-        f"\n--- {COLOR_MAGENTA}Stage 2: {stage2_type_str}{COLOR_RESET} "
-        f"(selecting top {len(candidates)} candidates ({cfg.stage2_top_pct}%) using model '{COLOR_BOLD}{s2_model_name}{COLOR_RESET}') ---"
-    )
-
-    cached_count = 0
-    assets_to_score: list[dict[str, Any]] = []
-    for item in candidates:
-        asset_obj = item.get("asset") or item["id"]
-        raw_s2 = store.get_stage2(asset_obj, model_id=s2_model_name, force=cfg.force_score)
-        if raw_s2 is not None:
-            item["raw_score_stage2"] = float(raw_s2)
-            reason_s2 = store.get_stage2_reason(
-                asset_obj, model_id=s2_model_name, force=cfg.force_score
-            )
-            if reason_s2 is not None:
-                item["reason_stage2"] = reason_s2
-            cached_count += 1
-        else:
-            assets_to_score.append(item)
-
-    print(f"Stage 2 cached: {cached_count}")
-    if cfg.use_cache_only:
-        if assets_to_score:
-            print("Running in --use-cache-only mode. Skipping Stage 2 scoring of uncached assets.")
-        return
-
-    print(f"Stage 2 needing scoring: {len(assets_to_score)}")
-    if not assets_to_score:
-        return
-
-    concurrency_s2 = 1 if not is_local_s2 else max(1, cfg.concurrency)
-    print(
-        f"Starting parallel Stage 2 scoring (using model '{s2_model_name}') with {concurrency_s2} worker threads."
-    )
-
-    def _score_one_s2(cand_item: dict[str, Any]) -> dict[str, Any]:
-        asset_id = str(cand_item["id"])
-        try:
-            raw_bytes = gateway.download_thumbnail(asset_id)
-            img_bytes = resize_image_bytes(raw_bytes, max_dim=evaluator.required_max_dimension)
-            eval_res = evaluator.evaluate(img_bytes)
-            store.record_stage2(
-                cand_item.get("asset") or asset_id,
-                eval_res.raw_score,
-                s2_model_name,
-                reason=eval_res.reason,
-            )
-            return {
-                "id": asset_id,
-                "item": cand_item,
-                "raw_score_stage2": eval_res.raw_score,
-                "reason_stage2": eval_res.reason,
-                "status": "success",
-            }
-        except Exception as exc:
-            return {"id": asset_id, "item": cand_item, "status": "error", "error": str(exc)}
-
-    def _on_s2_success(res: dict[str, Any], pbar: Any) -> None:
-        cand = res["item"]
-        cand["raw_score_stage2"] = res["raw_score_stage2"]
-        cand["reason_stage2"] = res.get("reason_stage2")
-        filename = cand["asset"].get("originalFileName") or cand["id"]
-        pbar.write(
-            f"Stage 2 Scored {COLOR_BLUE}{filename}{COLOR_RESET} using "
-            f"'{COLOR_BOLD}{s2_model_name}{COLOR_RESET}': "
-            f"Raw Score {COLOR_GREEN}{res['raw_score_stage2']:.2f}{COLOR_RESET} | "
-            f"Stage 1 Raw: {COLOR_YELLOW}{cand['raw_score_stage1']:.2f}{COLOR_RESET}"
-        )
-
-    _run_parallel_stage(
-        stage_num=2,
-        items_to_score=assets_to_score,
-        concurrency=concurrency_s2,
-        store=store,
-        worker_fn=_score_one_s2,
-        on_success=_on_s2_success,
-    )
-
-
 def _sync_star_ratings(
     scored_assets: Sequence[dict[str, Any]],
     gateway: ImmichGateway,
@@ -707,10 +498,11 @@ def run_scoring_workflow(
 ) -> list[dict[str, Any]]:
     """Coordinates `ImmichGateway`, `EvaluationStore`, `ImageEvaluator`, and `ScorePipeline`.
 
-    Executes Stage 1 (and optional Stage 2) evaluations across a thread pool, atomically
-    flushes intermediate and final calibrated scores to `store`, optionally synchronizes
-    `1–5` star ratings back to Immich (`cfg.write_ratings`), and updates the target
-    highlights album unless `cfg.dry_run` is enabled.
+    Delegates Stage 1 (and optional Stage 2) evaluation, z-score sigmoid calibration,
+    score fusion, store persistence, and burst deduplication to `pipeline.run(...)`,
+    optionally synchronizes `1–5` star ratings back to Immich (`cfg.write_ratings`) across
+    `result.scored_assets`, and updates the target highlights album from
+    `result.deduplicated_assets[:cfg.limit]` unless `cfg.dry_run` is enabled.
 
     Args:
         cfg: Resolved `ScorerConfig` parameters.
@@ -763,6 +555,20 @@ def run_scoring_workflow(
             rate_limiter=rate_limiter,
         )
 
+    if cfg.two_stage and stage2_evaluator is None:
+        stage2_evaluator = create_evaluator(
+            scorer_type=cfg.scorer_type,
+            stage=2,
+            stage2_model=cfg.stage2_model,
+            gemini_key=cfg.gemini_key,
+            gemini_model=cfg.gemini_model,
+            openai_key=cfg.openai_key,
+            openai_url=cfg.openai_url,
+            openai_model=cfg.openai_model,
+            delay=cfg.delay,
+            rate_limiter=rate_limiter,
+        )
+
     if pipeline is None:
         pipeline = ScorePipeline(
             stage2_weight=cfg.stage2_weight,
@@ -782,96 +588,30 @@ def run_scoring_workflow(
 
     print(f"\n--- {COLOR_CYAN}Stage 1: {stage1_type_str}{COLOR_RESET} (using {s1_label}) ---")
 
-    stage1_results = _evaluate_stage1_batch(assets, cfg, gateway, store, stage1_evaluator)
-    s1_stats = pipeline.calibrate_stage1(stage1_results)
-
-    if not cfg.two_stage:
-        print("\nCalibrating aesthetic scores based on library distribution...")
-        print("Library Statistics:")
-        print(f"  - Total Scored Photos: {len(stage1_results)}")
-        print(f"  - Raw Score Mean: {s1_stats.mean:.3f}")
-        print(f"  - Raw Score Std Dev: {s1_stats.std:.3f}")
-        print("Applying sigmoid normalization and updating cache...")
-
-        scored_assets = pipeline.single_stage_finalize(stage1_results)
-        for item in scored_assets:
-            store.record_final(
-                asset_id=str(item["id"]),
-                score=int(item["score"]),
-                reason=str(item["reason"]),
-                raw_score_stage1=float(item["raw_score_stage1"]),
-                model_id_stage1=stage1_evaluator.model_id,
-                updated_at=get_asset_mod_time(item["asset"]),
-            )
-        store.flush()
-        print("Cache updated successfully!")
-    else:
-        if stage2_evaluator is None:
-            stage2_evaluator = create_evaluator(
-                scorer_type=cfg.scorer_type,
-                stage=2,
-                stage2_model=cfg.stage2_model,
-                gemini_key=cfg.gemini_key,
-                gemini_model=cfg.gemini_model,
-                openai_key=cfg.openai_key,
-                openai_url=cfg.openai_url,
-                openai_model=cfg.openai_model,
-                delay=cfg.delay,
-                rate_limiter=rate_limiter,
-            )
-
-        candidates_for_stage2, _ = pipeline.split_candidates(
-            stage1_results, top_pct=cfg.stage2_top_pct
-        )
-        _evaluate_stage2_batch(candidates_for_stage2, cfg, gateway, store, stage2_evaluator)
-
-        print(
-            f"\nCombining Stage 1 ({stage1_evaluator.model_id}) and "
-            f"Stage 2 ({stage2_evaluator.model_id}) scores..."
-        )
-        scored_assets = pipeline.fuse_stage2(stage1_results)
-        s2_stats = pipeline.s2_stats
-        if s2_stats is not None:
-            print("Stage 2 Statistics:")
-            print(f"  - Total Scored Candidates: {len(scored_assets)}")
-            print(f"  - Raw Score Mean: {s2_stats.mean:.3f}")
-            print(f"  - Raw Score Std Dev: {s2_stats.std:.3f}")
-
-        for item in scored_assets:
-            raw_s2_val = item.get("raw_score_stage2")
-            store.record_final(
-                asset_id=str(item["id"]),
-                score=int(item["score"]),
-                reason=str(item["reason"]),
-                raw_score_stage1=float(item["raw_score_stage1"]),
-                model_id_stage1=stage1_evaluator.model_id,
-                raw_score_stage2=float(raw_s2_val) if raw_s2_val is not None else None,
-                model_id_stage2=stage2_evaluator.model_id if raw_s2_val is not None else None,
-                reason_stage2=item.get("reason_stage2"),
-                updated_at=get_asset_mod_time(item["asset"]),
-            )
-        store.flush()
-        print("Cache updated successfully with combined scores!")
+    result = pipeline.run(
+        assets=assets,
+        store=store,
+        stage1_evaluator=stage1_evaluator,
+        thumbnail_loader=gateway.download_thumbnail,
+        stage2_evaluator=stage2_evaluator if cfg.two_stage else None,
+        stage2_top_pct=cfg.stage2_top_pct,
+        concurrency=cfg.concurrency,
+        force_score=cfg.force_score,
+        use_cache_only=cfg.use_cache_only,
+        delay=cfg.delay,
+        scorer_type=cfg.scorer_type,
+    )
 
     if cfg.write_ratings:
         if cfg.dry_run:
             print("\n[Dry Run] skipping star ratings sync to Immich.")
         else:
-            _sync_star_ratings(scored_assets, gateway, cfg.concurrency)
+            _sync_star_ratings(result.scored_assets, gateway, cfg.concurrency)
 
-    if cfg.dedup_window > 0:
-        print(f"\nDeduplicating burst photos within a {cfg.dedup_window}-second window...")
-        original_count = len(scored_assets)
-        scored_assets = pipeline.deduplicate(scored_assets, dedup_window=float(cfg.dedup_window))
-        print(
-            f"Deduplicated burst photos: Kept {len(scored_assets)} unique highlights out of "
-            f"{original_count} scored photos (Filtered out {original_count - len(scored_assets)} burst duplicates)."
-        )
-
-    scored_assets.sort(key=lambda x: x["score"], reverse=True)
+    deduplicated_assets = result.deduplicated_assets
 
     print("\n--- TOP 10 HIGHEST SCORING IMAGES ---")
-    for idx, item in enumerate(scored_assets[:10], 1):
+    for idx, item in enumerate(deduplicated_assets[:10], 1):
         asset_info = item["asset"]
         orig_name = asset_info.get("originalFileName", "Unknown")
         created_at = str(asset_info.get("fileCreatedAt", "Unknown Date"))[:10]
@@ -879,8 +619,8 @@ def run_scoring_workflow(
             f"{idx:2d}. Score: {item['score']:3d} | File: {orig_name} ({created_at}) | Reason: {item['reason']}"
         )
 
-    limit = min(cfg.limit, len(scored_assets))
-    top_assets = scored_assets[:limit]
+    limit = min(cfg.limit, len(deduplicated_assets))
+    top_assets = deduplicated_assets[:limit]
     print(
         f"\nSelecting the {limit} highest scoring images (Minimum score in top selection: "
         f"{top_assets[-1]['score'] if top_assets else 0})."

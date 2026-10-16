@@ -219,6 +219,73 @@ class TestSingleStageWorkflow:
         assert entry_a2["score"] > 50
         assert "Local CLIP score:" in entry_a2["reason"]
 
+    def test_workflow_delegates_to_pipeline_run_and_separates_rating_sync_from_deduplicated_highlights(
+        self,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from immich_aesthetic_scorer.evaluators import FakeEvaluator
+        from immich_aesthetic_scorer.pipeline import PipelineResult, PopulationStats
+        from immich_aesthetic_scorer.store import EvaluationStore
+        from score_assets import run_scoring_workflow
+
+        assets = [
+            {"id": "a1", "type": "IMAGE", "originalFileName": "one.jpg"},
+            {"id": "a2", "type": "IMAGE", "originalFileName": "two.jpg"},
+            {"id": "a3", "type": "IMAGE", "originalFileName": "three.jpg"},
+        ]
+        gateway = MagicMock()
+        gateway.fetch_image_assets.return_value = assets
+        gateway.download_thumbnail.return_value = b"raw-bytes"
+
+        fake_result = PipelineResult(
+            scored_assets=[
+                {"id": "a1", "score": 92, "rating": 5, "reason": "r1", "asset": assets[0]},
+                {"id": "a2", "score": 90, "rating": 5, "reason": "r2", "asset": assets[1]},
+                {"id": "a3", "score": 60, "rating": 3, "reason": "r3", "asset": assets[2]},
+            ],
+            deduplicated_assets=[
+                {"id": "a1", "score": 92, "rating": 5, "reason": "r1", "asset": assets[0]},
+                {"id": "a3", "score": 60, "rating": 3, "reason": "r3", "asset": assets[2]},
+            ],
+            stage1_stats=PopulationStats(mean=6.0, std=1.0),
+            stage2_stats=None,
+        )
+
+        pipeline = MagicMock()
+        pipeline.run.return_value = fake_result
+
+        cfg = ScorerConfig(
+            immich_url="http://immich.local:2283",
+            api_key="secret",
+            person_id="person-1",
+            target_album_name="Best of Person",
+            scorer_type="local",
+            write_ratings=True,
+            dedup_window=10,
+            limit=1,
+            two_stage=False,
+        )
+
+        top_assets = run_scoring_workflow(
+            cfg,
+            gateway=gateway,
+            store=EvaluationStore.in_memory(),
+            stage1_evaluator=FakeEvaluator(model_id="fake-s1"),
+            pipeline=pipeline,
+        )
+
+        pipeline.run.assert_called_once()
+        # Star ratings synced across all 3 scored_assets (including burst-filtered a2)
+        synced_ids = [
+            aid for call in gateway.update_assets_rating.call_args_list for aid in call.args[0]
+        ]
+        assert sorted(synced_ids) == ["a1", "a2", "a3"]
+
+        # Highlights album uses deduplicated_assets[:limit] -> ["a1"]
+        assert [item["id"] for item in top_assets] == ["a1"]
+        gateway.ensure_album_with_assets.assert_called_once_with("Best of Person", ["a1"])
+
 
 class TestTwoStageWorkflow:
     def test_two_stage_workflow_promotes_top_candidates_fuses_scores_and_respects_dry_run(

@@ -1,141 +1,42 @@
-import pytest
+import io
 
+import pytest
+from PIL import Image
+
+import immich_aesthetic_scorer.pipeline as pipeline_mod
+from immich_aesthetic_scorer.evaluators import EvaluationResult, FakeEvaluator
 from immich_aesthetic_scorer.pipeline import (
+    PipelineResult,
     PopulationStats,
     ScorePipeline,
-    calculate_population_stats,
-    deduplicate_bursts,
-    fuse_scores,
-    normalize_z_score,
-    parse_asset_time,
     score_to_stars,
-    select_candidates,
 )
+from immich_aesthetic_scorer.store import EvaluationStore
 
 
-def test_calculate_population_stats_standard():
-    # Mean: (2+4+4+4+5+5+7+9)/8 = 40/8 = 5.0
-    # Population variance: ((2-5)^2 + 3*(4-5)^2 + 2*(5-5)^2 + (7-5)^2 + (9-5)^2) / 8
-    # = (9 + 3 + 0 + 4 + 16) / 8 = 32 / 8 = 4.0
-    # Population std: sqrt(4.0) = 2.0
-    scores = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
-    stats = calculate_population_stats(scores, min_std=1.0)
-    assert isinstance(stats, PopulationStats)
-    assert stats.mean == pytest.approx(5.0)
-    assert stats.std == pytest.approx(2.0)
+def _make_jpeg_bytes(width: int = 800, height: int = 600, color: str = "blue") -> bytes:
+    img = Image.new("RGB", (width, height), color=color)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
 
 
-def test_calculate_population_stats_enforces_floor_guard():
-    # Uniform scores: variance = 0.0, std = 0.0 < floor 1.0
-    uniform_scores = [5.0, 5.0, 5.0]
-    stats_s1 = calculate_population_stats(uniform_scores, min_std=1.0)
-    assert stats_s1.mean == pytest.approx(5.0)
-    assert stats_s1.std == 1.0
-
-    # Narrow scores: std < 1.0
-    narrow_scores = [5.0, 5.2, 4.8]
-    stats_narrow = calculate_population_stats(narrow_scores, min_std=1.0)
-    assert stats_narrow.mean == pytest.approx(5.0)
-    assert stats_narrow.std == 1.0
-
-    # Stage 2 floor guard: min_std=0.01
-    stats_s2 = calculate_population_stats(uniform_scores, min_std=0.01)
-    assert stats_s2.mean == pytest.approx(5.0)
-    assert stats_s2.std == 0.01
-
-    # Custom floor guard: min_std=2.0
-    stats_custom = calculate_population_stats(uniform_scores, min_std=2.0)
-    assert stats_custom.mean == pytest.approx(5.0)
-    assert stats_custom.std == 2.0
-
-
-def test_calculate_population_stats_empty_and_single_fallbacks():
-    empty_stats = calculate_population_stats([], min_std=1.0, default_mean=6.0, default_std=1.0)
-    assert empty_stats.mean == 6.0
-    assert empty_stats.std == 1.0
-
-    single_stats = calculate_population_stats([7.5], min_std=1.0, default_mean=6.0, default_std=1.0)
-    assert single_stats.mean == 6.0
-    assert single_stats.std == 1.0
-
-
-def test_normalize_z_score_exact_mean_is_50():
-    # When raw == mean, z = 0, sigmoid = 100 / (1 + 1) = 50.0
-    assert normalize_z_score(5.0, mean=5.0, std=1.0) == pytest.approx(50.0)
-
-
-def test_normalize_z_score_formula_and_bounds():
-    # z = (7.0 - 5.0) / 1.0 = 2.0
-    # S = 100 / (1 + exp(-1.5 * 2.0)) = 100 / (1 + exp(-3.0)) ~ 95.2574
-    expected_pos = 100.0 / (1.0 + 0.049787068)
-    assert normalize_z_score(7.0, mean=5.0, std=1.0) == pytest.approx(expected_pos, rel=1e-4)
-
-    # z = (3.0 - 5.0) / 1.0 = -2.0
-    # S = 100 / (1 + exp(-1.5 * -2.0)) = 100 / (1 + exp(3.0)) ~ 4.74258
-    expected_neg = 100.0 / (1.0 + 20.0855369)
-    assert normalize_z_score(3.0, mean=5.0, std=1.0) == pytest.approx(expected_neg, rel=1e-4)
-
-    # Extreme values asymptote and clamp cleanly to [0.0, 100.0]
-    assert normalize_z_score(1000.0, mean=5.0, std=1.0) == 100.0
-    assert normalize_z_score(-1000.0, mean=5.0, std=1.0) == 0.0
-
-    # Zero or invalid std dev gracefully defaults to std=1.0
-    assert normalize_z_score(5.0, mean=5.0, std=0.0) == 50.0
-
-
-def test_select_candidates_percentile_split():
-    # 10 items with s1_norm scores from 10 to 100
-    items = [{"id": f"img{i}", "s1_norm": float(i * 10)} for i in range(1, 11)]
-
-    # Top 20% -> 2 items (img10 with 100.0, img9 with 90.0)
-    candidates, non_candidates = select_candidates(items, top_pct=20.0)
-    assert len(candidates) == 2
-    assert len(non_candidates) == 8
-    assert [c["id"] for c in candidates] == ["img10", "img9"]
-    assert [nc["id"] for nc in non_candidates] == [f"img{i}" for i in range(8, 0, -1)]
-
-
-def test_select_candidates_edge_cases():
-    # Empty items
-    empty_cand, empty_non_cand = select_candidates([], top_pct=20.0)
-    assert empty_cand == []
-    assert empty_non_cand == []
-
-    # Single item with small top_pct still guarantees at least 1 candidate
-    single_item = [{"id": "only", "s1_norm": 42.0}]
-    c, nc = select_candidates(single_item, top_pct=5.0)
-    assert len(c) == 1
-    assert c[0]["id"] == "only"
-    assert nc == []
-
-    # 100% selects all items
-    items = [{"id": f"img{i}", "s1_norm": float(i)} for i in range(3)]
-    c, nc = select_candidates(items, top_pct=100.0)
-    assert len(c) == 3
-    assert len(nc) == 0
-
-
-def test_fuse_scores_candidate():
-    # S1 = 80.0, S2 = 60.0, weight = 0.5 -> 0.5 * 80 + 0.5 * 60 = 70.0
-    assert fuse_scores(80.0, s2_norm=60.0, stage2_weight=0.5) == pytest.approx(70.0)
-
-    # Custom weight: weight = 0.25 -> 0.75 * 80 + 0.25 * 60 = 60 + 15 = 75.0
-    assert fuse_scores(80.0, s2_norm=60.0, stage2_weight=0.25) == pytest.approx(75.0)
-
-    # Weight extremes: 0.0 uses S1 only, 1.0 uses S2 only
-    assert fuse_scores(80.0, s2_norm=60.0, stage2_weight=0.0) == pytest.approx(80.0)
-    assert fuse_scores(80.0, s2_norm=60.0, stage2_weight=1.0) == pytest.approx(60.0)
-
-
-def test_fuse_scores_non_candidate_fallback():
-    # Non-candidate has s2_norm=None, receives continuous fallback S2 = 50.0
-    # S1 = 80.0, weight = 0.5 -> 0.5 * 80 + 0.5 * 50 = 40 + 25 = 65.0
-    assert fuse_scores(80.0, s2_norm=None, stage2_weight=0.5) == pytest.approx(65.0)
-
-    # Continuity test: A candidate with S2 = 50.0 gets the exact same score as a non-candidate
-    cand_score = fuse_scores(72.5, s2_norm=50.0, stage2_weight=0.4)
-    non_cand_score = fuse_scores(72.5, s2_norm=None, stage2_weight=0.4)
-    assert cand_score == pytest.approx(non_cand_score)
+def test_public_module_interface_is_narrowed():
+    assert set(pipeline_mod.__all__) == {
+        "PipelineResult",
+        "PopulationStats",
+        "ScorePipeline",
+        "score_to_stars",
+    }
+    for legacy_helper in (
+        "calculate_population_stats",
+        "normalize_z_score",
+        "select_candidates",
+        "fuse_scores",
+        "parse_asset_time",
+        "deduplicate_bursts",
+    ):
+        assert not hasattr(pipeline_mod, legacy_helper)
 
 
 def test_score_to_stars_thresholds():
@@ -162,159 +63,355 @@ def test_score_to_stars_thresholds():
     assert score_to_stars(-10.0) == 1
 
 
-def test_parse_asset_time():
-    from datetime import datetime
-
-    # ISO format with Z
-    item1 = {"asset": {"fileCreatedAt": "2026-07-25T14:30:00.000Z"}}
-    dt1 = parse_asset_time(item1)
-    assert dt1 == datetime(2026, 7, 25, 14, 30, 0)
-    assert dt1.tzinfo is None  # Must be timezone-naive
-
-    # localDateTime field
-    item2 = {"asset": {"localDateTime": "2026-07-25T15:00:00"}}
-    assert parse_asset_time(item2) == datetime(2026, 7, 25, 15, 0, 0)
-
-    # Flat dict support
-    item3 = {"createdAt": "2026-07-25T16:00:00+00:00"}
-    assert parse_asset_time(item3) == datetime(2026, 7, 25, 16, 0, 0)
-
-    # Missing or invalid timestamp returns datetime.min
-    assert parse_asset_time({}) == datetime.min
-    assert parse_asset_time({"asset": {"createdAt": "invalid-date"}}) == datetime.min
-
-
-def test_deduplicate_bursts_clustering():
-    # 3 photos in a 2-second burst window (t=0s, t=1s, t=2s), highest score is img2 (score 92)
+def test_run_single_stage_evaluates_downscales_calibrates_and_persists_to_store():
+    # Mean: (2+4+4+4+5+5+7+9)/8 = 40/8 = 5.0
+    # Population variance: ((2-5)^2 + 3*(4-5)^2 + 2*(5-5)^2 + (7-5)^2 + (9-5)^2) / 8 = 32 / 8 = 4.0
+    # Population std: sqrt(4.0) = 2.0
+    raw_scores = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
     assets = [
-        {"id": "img1", "score": 80, "asset": {"fileCreatedAt": "2026-07-25T12:00:00Z"}},
-        {"id": "img2", "score": 92, "asset": {"fileCreatedAt": "2026-07-25T12:00:01Z"}},
-        {"id": "img3", "score": 85, "asset": {"fileCreatedAt": "2026-07-25T12:00:02Z"}},
-        # Separate photo 10 seconds later
-        {"id": "img4", "score": 70, "asset": {"fileCreatedAt": "2026-07-25T12:00:12Z"}},
+        {
+            "id": f"a{i}",
+            "originalFileName": f"photo_{i}.jpg",
+            "fileModifiedAt": "2026-07-25T10:00:00Z",
+            "fileCreatedAt": f"2026-07-25T10:0{i}:00Z",
+        }
+        for i in range(len(raw_scores))
     ]
+    score_by_id = {f"a{i}": score for i, score in enumerate(raw_scores)}
+    raw_800x600 = _make_jpeg_bytes(800, 600)
 
-    deduped = deduplicate_bursts(assets, dedup_window=2.0)
-    assert len(deduped) == 2
-    assert deduped[0]["id"] == "img2"
-    assert deduped[1]["id"] == "img4"
+    loaded_ids: list[str] = []
 
+    def thumbnail_loader(asset_id: str) -> bytes:
+        loaded_ids.append(asset_id)
+        return raw_800x600
 
-def test_deduplicate_bursts_edge_cases():
-    # dedup_window <= 0 disables deduplication
-    assets = [
-        {"id": "img1", "score": 80, "asset": {"fileCreatedAt": "2026-07-25T12:00:00Z"}},
-        {"id": "img2", "score": 90, "asset": {"fileCreatedAt": "2026-07-25T12:00:01Z"}},
-    ]
-    assert len(deduplicate_bursts(assets, dedup_window=0)) == 2
-    assert len(deduplicate_bursts(assets, dedup_window=-1.0)) == 2
-
-    # Empty list
-    assert deduplicate_bursts([], dedup_window=5.0) == []
-
-    # Out-of-order input is sorted chronologically before clustering
-    unordered = [
-        {"id": "img2", "score": 95, "asset": {"fileCreatedAt": "2026-07-25T12:00:01Z"}},
-        {"id": "img1", "score": 80, "asset": {"fileCreatedAt": "2026-07-25T12:00:00Z"}},
-    ]
-    deduped = deduplicate_bursts(unordered, dedup_window=2.0)
-    assert len(deduped) == 1
-    assert deduped[0]["id"] == "img2"
-
-    # Photos with unparseable timestamps are preserved individually without error
-    unparseable = [
-        {"id": "broken1", "score": 50, "asset": {}},
-        {"id": "valid1", "score": 90, "asset": {"fileCreatedAt": "2026-07-25T12:00:00Z"}},
-        {"id": "valid2", "score": 80, "asset": {"fileCreatedAt": "2026-07-25T12:00:01Z"}},
-    ]
-    res = deduplicate_bursts(unparseable, dedup_window=2.0)
-    assert len(res) == 2
-    ids = [x["id"] for x in res]
-    assert "broken1" in ids
-    assert "valid1" in ids
-    assert "valid2" not in ids
-
-
-def test_score_pipeline_single_stage():
+    eval_iter = iter(raw_scores)
+    s1_eval = FakeEvaluator(
+        scores=lambda _b: next(eval_iter),
+        model_id="fake-s1",
+        required_max_dimension=512,
+    )
+    store = EvaluationStore.in_memory()
     pipeline = ScorePipeline(min_std_s1=1.0)
-    assets = [
-        {"id": "a1", "raw_score_stage1": 8.0},
-        {"id": "a2", "raw_score_stage1": 6.0},
-        {"id": "a3", "raw_score_stage1": 4.0},
-    ]
 
-    stats = pipeline.calibrate_stage1(assets)
-    assert stats.mean == pytest.approx(6.0)
-    assert "s1_norm" in assets[0]
-    assert assets[0]["s1_norm"] > 50.0
-    assert assets[1]["s1_norm"] == pytest.approx(50.0)
-    assert assets[2]["s1_norm"] < 50.0
+    result = pipeline.run(
+        assets=assets,
+        store=store,
+        stage1_evaluator=s1_eval,
+        thumbnail_loader=thumbnail_loader,
+        concurrency=1,
+        scorer_type="local",
+    )
 
-    finalized = pipeline.single_stage_finalize(assets)
-    assert finalized[0]["score"] > 50
-    assert finalized[1]["score"] == 50
-    assert finalized[1]["rating"] == 3
-    assert "reason" in finalized[0]
+    assert isinstance(result, PipelineResult)
+    assert isinstance(result.stage1_stats, PopulationStats)
+    assert result.stage1_stats.mean == pytest.approx(5.0)
+    assert result.stage1_stats.std == pytest.approx(2.0)
+    assert result.stage2_stats is None
 
+    # All 8 thumbnails loaded and downscaled to max_dim=512
+    assert len(loaded_ids) == 8
+    assert len(s1_eval.evaluated_images) == 8
+    first_img = Image.open(io.BytesIO(s1_eval.evaluated_images[0]))
+    assert max(first_img.size) == 512
 
-def test_score_pipeline_two_stage():
-    pipeline = ScorePipeline(stage2_weight=0.5)
-    assets = [
-        {"id": "a1", "raw_score_stage1": 9.0},
-        {"id": "a2", "raw_score_stage1": 8.0},
-        {"id": "a3", "raw_score_stage1": 5.0},
-        {"id": "a4", "raw_score_stage1": 4.0},
-    ]
+    by_id = {item["id"]: item for item in result.scored_assets}
+    # a4 has raw=5.0 == mean -> z=0 -> s1_norm=50.0 -> score=50, rating=3
+    assert by_id["a4"]["s1_norm"] == pytest.approx(50.0)
+    assert by_id["a4"]["score"] == 50
+    assert by_id["a4"]["rating"] == 3
 
-    pipeline.calibrate_stage1(assets)
-    candidates, non_candidates = pipeline.split_candidates(assets, top_pct=50.0)
-    assert len(candidates) == 2
-    assert [c["id"] for c in candidates] == ["a1", "a2"]
+    # a7 has raw=9.0 -> z=(9-5)/2 = 2.0 -> 100 / (1 + exp(-3.0)) ~ 95.2574 -> score=95, rating=5
+    expected_pos = 100.0 / (1.0 + 0.049787068)
+    assert by_id["a7"]["s1_norm"] == pytest.approx(expected_pos, rel=1e-4)
+    assert by_id["a7"]["score"] == 95
+    assert by_id["a7"]["rating"] == 5
 
-    # Provide stage 2 raw scores for candidates
-    candidates[0]["raw_score_stage2"] = 80.0
-    candidates[1]["raw_score_stage2"] = 60.0
+    # deduplicated_assets is sorted descending by calibrated score
+    dedup_scores = [item["score"] for item in result.deduplicated_assets]
+    assert dedup_scores == sorted(dedup_scores, reverse=True)
+    assert result.deduplicated_assets[0]["id"] == "a7"
 
-    fused = pipeline.fuse_stage2(assets)
-    by_id = {item["id"]: item for item in fused}
-
-    # Candidates should have fused scores
-    assert "s2_norm" in by_id["a1"]
-    assert "s2_norm" in by_id["a2"]
-    assert by_id["a1"]["score"] >= by_id["a2"]["score"]
-    assert "Two-stage:" in by_id["a1"]["reason"]
-
-    # Non-candidates should have fallback scores
-    assert "s2_norm" not in by_id["a3"]
-    assert "Stage 1 only:" in by_id["a3"]["reason"]
-    assert 1 <= by_id["a3"]["rating"] <= 5
+    # Store persisted final entries for every asset
+    for aid, expected_raw in score_by_id.items():
+        entry = store.get_entry(aid)
+        assert entry is not None
+        assert entry["raw_score_stage1"] == pytest.approx(expected_raw)
+        assert entry["model_id_stage1"] == "fake-s1"
+        assert entry["score"] == by_id[aid]["score"]
+        assert "Local CLIP score:" in entry["reason"]
 
 
-def test_score_pipeline_uniform_scores_zero_variance():
-    pipeline = ScorePipeline(min_std_s1=1.0)
-    assets = [
-        {"id": "u1", "raw_score_stage1": 7.0},
-        {"id": "u2", "raw_score_stage1": 7.0},
-        {"id": "u3", "raw_score_stage1": 7.0},
-    ]
+def test_run_enforces_stage1_and_stage2_variance_floor_guards():
+    assets = [{"id": f"u{i}", "fileModifiedAt": "2026-07-25T10:00:00Z"} for i in range(4)]
+    # Narrow Stage 1 scores: [5.0, 5.2, 4.8, 5.0] -> std < 1.0 -> floor 1.0 enforced
+    s1_scores = iter([5.0, 5.2, 4.8, 5.0])
+    s1_eval = FakeEvaluator(
+        scores=lambda _b: next(s1_scores),
+        model_id="fake-s1",
+        required_max_dimension=None,
+    )
+    # Uniform Stage 2 scores: [70.0, 70.0] -> std == 0.0 -> floor 0.01 enforced
+    s2_eval = FakeEvaluator(
+        scores=lambda _b: 70.0,
+        model_id="musiq-spaq",
+        required_max_dimension=None,
+    )
+    store = EvaluationStore.in_memory()
+    pipeline = ScorePipeline(min_std_s1=1.0, min_std_s2=0.01, stage2_weight=0.5)
 
-    stats = pipeline.calibrate_stage1(assets)
-    assert stats.mean == 7.0
-    assert stats.std == 1.0  # Floor enforced
+    result = pipeline.run(
+        assets=assets,
+        store=store,
+        stage1_evaluator=s1_eval,
+        stage2_evaluator=s2_eval,
+        thumbnail_loader=lambda _aid: b"img",
+        stage2_top_pct=50.0,
+        concurrency=1,
+    )
 
-    finalized = pipeline.single_stage_finalize(assets)
-    for item in finalized:
+    assert result.stage1_stats.mean == pytest.approx(5.0)
+    assert result.stage1_stats.std == 1.0
+    assert result.stage2_stats is not None
+    assert result.stage2_stats.mean == pytest.approx(70.0)
+    assert result.stage2_stats.std == 0.01
+
+    # Custom floor guard via constructor
+    custom_pipeline = ScorePipeline(min_std_s1=2.0)
+    uniform_s1 = FakeEvaluator(
+        scores=lambda _b: 7.0, model_id="fake-uniform", required_max_dimension=None
+    )
+    custom_res = custom_pipeline.run(
+        assets=assets[:3],
+        store=EvaluationStore.in_memory(),
+        stage1_evaluator=uniform_s1,
+        thumbnail_loader=lambda _aid: b"img",
+        concurrency=1,
+    )
+    assert custom_res.stage1_stats.mean == pytest.approx(7.0)
+    assert custom_res.stage1_stats.std == 2.0
+    for item in custom_res.scored_assets:
         assert item["score"] == 50
         assert item["rating"] == 3
 
 
-def test_score_pipeline_empty_collection():
+def test_run_empty_and_single_asset_population_fallbacks():
     pipeline = ScorePipeline()
-    stats = pipeline.calibrate_stage1([])
-    assert stats.mean == 6.0
-    assert stats.std == 1.0
-    assert pipeline.single_stage_finalize([]) == []
-    c, nc = pipeline.split_candidates([], top_pct=20.0)
-    assert c == [] and nc == []
-    assert pipeline.fuse_stage2([]) == []
-    assert pipeline.deduplicate([]) == []
+    s1_eval = FakeEvaluator(default_score=7.5, model_id="fake-s1", required_max_dimension=None)
+    s2_eval = FakeEvaluator(default_score=80.0, model_id="musiq-spaq", required_max_dimension=None)
+
+    # Empty collection
+    empty_res = pipeline.run(
+        assets=[],
+        store=EvaluationStore.in_memory(),
+        stage1_evaluator=s1_eval,
+        stage2_evaluator=s2_eval,
+        thumbnail_loader=lambda _aid: b"img",
+    )
+    assert empty_res.scored_assets == []
+    assert empty_res.deduplicated_assets == []
+    assert empty_res.stage1_stats == PopulationStats(mean=6.0, std=1.0)
+    assert empty_res.stage2_stats == PopulationStats(mean=50.0, std=10.0)
+
+    # Single asset collection uses default_mean=6.0, default_std=1.0 for S1
+    # and guarantees at least 1 candidate promoted to Stage 2 even with small top_pct
+    single_res = pipeline.run(
+        assets=[{"id": "only", "fileModifiedAt": "2026-07-25T10:00:00Z"}],
+        store=EvaluationStore.in_memory(),
+        stage1_evaluator=s1_eval,
+        stage2_evaluator=s2_eval,
+        thumbnail_loader=lambda _aid: b"img",
+        stage2_top_pct=5.0,
+        concurrency=1,
+    )
+    assert single_res.stage1_stats == PopulationStats(mean=6.0, std=1.0)
+    assert single_res.stage2_stats == PopulationStats(mean=50.0, std=10.0)
+    assert len(single_res.scored_assets) == 1
+    assert "s2_norm" in single_res.scored_assets[0]
+
+
+def test_run_sigmoid_extreme_bounds():
+    # Single-asset population uses fallback mean=6.0, std=1.0, so extreme raw scores
+    # produce |z| >> 700 and clamp cleanly to 0.0 and 100.0 without OverflowError
+    pipeline = ScorePipeline(min_std_s1=1.0)
+
+    low_res = pipeline.run(
+        assets=[{"id": "low", "fileModifiedAt": "2026-07-25T10:00:00Z"}],
+        store=EvaluationStore.in_memory(),
+        stage1_evaluator=FakeEvaluator(
+            default_score=-10000.0, model_id="fake-s1", required_max_dimension=None
+        ),
+        thumbnail_loader=lambda _aid: b"low",
+        concurrency=1,
+    )
+    assert low_res.scored_assets[0]["s1_norm"] == 0.0
+    assert low_res.scored_assets[0]["score"] == 0
+
+    high_res = pipeline.run(
+        assets=[{"id": "high", "fileModifiedAt": "2026-07-25T10:00:00Z"}],
+        store=EvaluationStore.in_memory(),
+        stage1_evaluator=FakeEvaluator(
+            default_score=10000.0, model_id="fake-s1", required_max_dimension=None
+        ),
+        thumbnail_loader=lambda _aid: b"high",
+        concurrency=1,
+    )
+    assert high_res.scored_assets[0]["s1_norm"] == 100.0
+    assert high_res.scored_assets[0]["score"] == 100
+
+
+def test_run_two_stage_candidate_promotion_and_continuous_50_fallback_fusion():
+    # 10 items with Stage 1 raw scores 1.0..10.0 -> top 20% promotes 2 candidates (img10, img9)
+    assets = [{"id": f"img{i}", "fileModifiedAt": "2026-07-25T10:00:00Z"} for i in range(1, 11)]
+    s1_map = {f"img{i}".encode(): float(i) for i in range(1, 11)}
+    # img10 gets S2=80.0, img9 gets S2=60.0 -> S2 mean=70.0, std=10.0
+    s2_map = {
+        b"img10": EvaluationResult(raw_score=80.0, reason="Crisp details"),
+        b"img9": EvaluationResult(raw_score=60.0, reason="Soft edges"),
+    }
+
+    s1_eval = FakeEvaluator(scores=s1_map, model_id="fake-s1", required_max_dimension=None)
+    s2_eval = FakeEvaluator(scores=s2_map, model_id="musiq-spaq", required_max_dimension=None)
+    store = EvaluationStore.in_memory()
+    pipeline = ScorePipeline(stage2_weight=0.4)
+
+    res = pipeline.run(
+        assets=assets,
+        store=store,
+        stage1_evaluator=s1_eval,
+        stage2_evaluator=s2_eval,
+        thumbnail_loader=lambda aid: aid.encode(),
+        stage2_top_pct=20.0,
+        concurrency=1,
+    )
+
+    # Exactly 2 candidates evaluated in Stage 2
+    assert set(s2_eval.evaluated_images) == {b"img10", b"img9"}
+    assert res.stage2_stats == PopulationStats(mean=70.0, std=10.0)
+
+    by_id = {item["id"]: item for item in res.scored_assets}
+    assert "s2_norm" in by_id["img10"]
+    assert "s2_norm" in by_id["img9"]
+    assert "Two-stage:" in by_id["img10"]["reason"]
+
+    # Non-candidates receive continuous fallback S2 = 50.0:
+    # combined = (1 - 0.4) * s1_norm + 0.4 * 50.0
+    for i in range(1, 9):
+        nc = by_id[f"img{i}"]
+        assert "s2_norm" not in nc
+        expected_combined = 0.6 * nc["s1_norm"] + 0.4 * 50.0
+        assert nc["score"] == int(round(expected_combined))
+        assert "Stage 1 only:" in nc["reason"]
+
+    # Continuity invariant: a candidate whose S2 raw equals the S2 population mean (s2_norm == 50.0)
+    # receives the exact same fused score as a non-candidate with the same s1_norm
+    cand_at_mean_s2 = {
+        b"c1": EvaluationResult(raw_score=80.0),
+        b"c2": EvaluationResult(raw_score=70.0),  # exactly at mean 70.0 -> s2_norm = 50.0
+        b"c3": EvaluationResult(raw_score=60.0),
+    }
+    cont_assets = [
+        {"id": "c1", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+        {"id": "c2", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+        {"id": "c3", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+        {"id": "nc", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+    ]
+    # Give c2 and nc the exact same Stage 1 score (7.0), while c1=9.0, c3=8.0
+    # Top 75% (3 of 4) promotes c1, c3, and c2 (or nc); pre-seed store so c1, c2, c3 are the top 3
+    cont_s1 = {b"c1": 9.0, b"c3": 8.0, b"c2": 7.0, b"nc": 6.9999}
+    cont_res = pipeline.run(
+        assets=cont_assets,
+        store=EvaluationStore.in_memory(),
+        stage1_evaluator=FakeEvaluator(scores=cont_s1, model_id="s1", required_max_dimension=None),
+        stage2_evaluator=FakeEvaluator(
+            scores=cand_at_mean_s2, model_id="s2", required_max_dimension=None
+        ),
+        thumbnail_loader=lambda aid: aid.encode(),
+        stage2_top_pct=75.0,
+        concurrency=1,
+    )
+    cont_by_id = {item["id"]: item for item in cont_res.scored_assets}
+    assert cont_by_id["c2"]["s2_norm"] == pytest.approx(50.0)
+    assert cont_by_id["c2"]["score"] == cont_by_id["nc"]["score"]
+
+
+def test_run_respects_cache_only_and_force_score():
+    assets = [
+        {"id": "cached", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+        {"id": "uncached", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+    ]
+    store = EvaluationStore.in_memory()
+    store.record_stage1(assets[0], raw_score=8.0, model_id="fake-s1")
+    store.record_stage2(assets[0], raw_score=85.0, model_id="musiq-spaq", reason="Cached S2")
+
+    s1_eval = FakeEvaluator(default_score=4.0, model_id="fake-s1", required_max_dimension=None)
+    s2_eval = FakeEvaluator(default_score=40.0, model_id="musiq-spaq", required_max_dimension=None)
+    pipeline = ScorePipeline()
+
+    # 1. use_cache_only=True skips uncached assets without invoking evaluators or thumbnail_loader
+    loader_calls: list[str] = []
+    cache_only_res = pipeline.run(
+        assets=assets,
+        store=store,
+        stage1_evaluator=s1_eval,
+        stage2_evaluator=s2_eval,
+        thumbnail_loader=lambda aid: (loader_calls.append(aid), b"img")[1],
+        use_cache_only=True,
+        stage2_top_pct=100.0,
+    )
+    assert loader_calls == []
+    assert len(s1_eval.evaluated_images) == 0
+    assert len(s2_eval.evaluated_images) == 0
+    assert [item["id"] for item in cache_only_res.scored_assets] == ["cached"]
+
+    # 2. force_score=True re-evaluates even cached assets
+    force_res = pipeline.run(
+        assets=[assets[0]],
+        store=store,
+        stage1_evaluator=s1_eval,
+        stage2_evaluator=s2_eval,
+        thumbnail_loader=lambda aid: (loader_calls.append(aid), b"img")[1],
+        force_score=True,
+        stage2_top_pct=100.0,
+        concurrency=1,
+    )
+    assert len(s1_eval.evaluated_images) == 1
+    assert len(s2_eval.evaluated_images) == 1
+    assert force_res.scored_assets[0]["raw_score_stage1"] == pytest.approx(4.0)
+    assert force_res.scored_assets[0]["raw_score_stage2"] == pytest.approx(40.0)
+
+
+def test_run_burst_deduplication_clusters_chronologically_and_preserves_all_scored_assets():
+    # Out-of-order burst of 3 photos within 2s window (img2 has highest score),
+    # 1 photo 10s later (img4), and 1 photo with unparseable timestamp (broken)
+    assets = [
+        {"id": "img3", "fileCreatedAt": "2026-07-25T12:00:02Z"},
+        {"id": "img1", "fileCreatedAt": "2026-07-25T12:00:00.000Z"},
+        {"id": "img2", "localDateTime": "2026-07-25T12:00:01"},
+        {"id": "img4", "createdAt": "2026-07-25T12:00:12+00:00"},
+        {"id": "broken", "createdAt": "invalid-date"},
+    ]
+    raw_map = {
+        b"img1": 6.0,
+        b"img2": 9.5,
+        b"img3": 7.5,
+        b"img4": 5.0,
+        b"broken": 4.0,
+    }
+    s1_eval = FakeEvaluator(scores=raw_map, model_id="fake-s1", required_max_dimension=None)
+    pipeline = ScorePipeline(dedup_window=2.0)
+
+    res = pipeline.run(
+        assets=assets,
+        store=EvaluationStore.in_memory(),
+        stage1_evaluator=s1_eval,
+        thumbnail_loader=lambda aid: aid.encode(),
+        concurrency=1,
+    )
+
+    # scored_assets retains all 5 evaluated assets (for star rating sync)
+    assert len(res.scored_assets) == 5
+
+    # deduplicated_assets keeps img2 (best of img1/img2/img3 burst), img4, and broken, sorted descending by score
+    assert [item["id"] for item in res.deduplicated_assets] == ["img2", "img4", "broken"]
