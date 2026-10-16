@@ -5,6 +5,9 @@ import unittest
 import warnings
 from unittest.mock import MagicMock, patch
 
+# Disable CUDA device probing during unit tests to prevent GPU driver initialization hangs
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
 # Silence PyTorch UserWarnings during testing
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
@@ -333,9 +336,12 @@ class TestImmichScorer(unittest.TestCase):
 
     @unittest.skipIf(not HAS_ML, "ML dependencies not installed")
     @patch("huggingface_hub.snapshot_download")
+    @patch("score_assets.torch")
     @patch("score_assets.Image.open")
     @patch("sys.path")
-    def test_score_image_local_siglip(self, mock_sys_path, mock_image_open, mock_snapshot_download):
+    def test_score_image_local_siglip(
+        self, mock_sys_path, mock_image_open, mock_torch, mock_snapshot_download
+    ):
         import score_assets
 
         score_assets.local_model = None
