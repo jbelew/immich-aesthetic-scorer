@@ -22,6 +22,20 @@ from typing import Any, Optional
 import requests
 from tqdm import tqdm
 
+from immich_aesthetic_scorer.evaluators import (  # noqa: F401
+    AESTHETIC_PROMPT,
+    EvaluationResult,
+    FakeEvaluator,
+    GeminiEvaluator,
+    ImageEvaluator,
+    LocalClipEvaluator,
+    OpenAIEvaluator,
+    PyIQAEvaluator,
+    RateLimiter,
+    RsinemaAestheticScorer,
+    create_evaluator,
+    negotiate_torch_device,
+)
 from immich_aesthetic_scorer.pipeline import (  # noqa: F401
     PopulationStats,
     ScorePipeline,
@@ -63,10 +77,8 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 
 # Define optional ML modules as Any to satisfy static type checking for conditional imports
 torch: Any = None
-nn: Any = None
 Image: Any = None
 CLIPProcessor: Any = None
-CLIPVisionModel: Any = None
 pyiqa: Any = None
 
 # Import local scoring libraries globally at startup to prevent thread-safety races during parallel execution
@@ -74,9 +86,8 @@ try:
     import torch
 
     torch.set_num_threads(1)
-    import torch.nn as nn
     from PIL import Image
-    from transformers import CLIPProcessor, CLIPVisionModel
+    from transformers import CLIPProcessor
 except ImportError:
     pass
 
@@ -85,43 +96,6 @@ try:
 except ImportError:
     pass
 
-# Determine dynamic base class for type safety
-BaseModule: Any = nn.Module if nn is not None else object
-
-
-class RsinemaAestheticScorer(BaseModule):
-    """PyTorch Module wrapping CLIP Vision model with multiple aesthetic classification heads.
-
-    Extracts 768-dimensional visual features using a pre-trained CLIP vision backbone
-    and evaluates them across seven aesthetic and technical attributes: overall aesthetics,
-    technical quality, composition, lighting, color harmony, depth of field, and semantic content.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.backbone = CLIPVisionModel.from_pretrained(
-            "openai/clip-vit-base-patch32", use_safetensors=False
-        ).vision_model
-        self.aesthetic_head = nn.Sequential(nn.Linear(768, 1))
-        self.quality_head = nn.Sequential(nn.Linear(768, 1))
-        self.composition_head = nn.Sequential(nn.Linear(768, 1))
-        self.light_head = nn.Sequential(nn.Linear(768, 1))
-        self.color_head = nn.Sequential(nn.Linear(768, 1))
-        self.dof_head = nn.Sequential(nn.Linear(768, 1))
-        self.content_head = nn.Sequential(nn.Linear(768, 1))
-
-    def forward(self, pixel_values):
-        outputs = self.backbone(pixel_values=pixel_values)
-        pooled = outputs[1]
-        aesthetic = self.aesthetic_head(pooled)
-        quality = self.quality_head(pooled)
-        composition = self.composition_head(pooled)
-        light = self.light_head(pooled)
-        color = self.color_head(pooled)
-        dof = self.dof_head(pooled)
-        content = self.content_head(pooled)
-        return torch.cat([aesthetic, quality, composition, light, color, dof, content], dim=-1)
-
 
 # Constants
 DEFAULT_GEMINI_KEY = None
@@ -129,29 +103,6 @@ DEFAULT_LIMIT = 100
 DEFAULT_CONCURRENCY = 5
 DEFAULT_DELAY = 4.0  # 4 seconds delay = max 15 RPM for free tier
 DEFAULT_CACHE_FILE = ".immich_aesthetic_cache.json"
-
-AESTHETIC_PROMPT = (
-    "You are an expert photography judge. Analyze this photo and score its overall aesthetic "
-    "quality and suitability for a high-quality highlight album.\n\n"
-    "IMPORTANT: You are analyzing a low-resolution thumbnail of the photo (512x512 pixels max). "
-    "It has been resized preserving its original aspect ratio and composition (it is NOT cropped). "
-    "Assume that basic image sharpness and technical focus have already been verified by a technical filter. "
-    "Do not penalize the score for lack of fine texture or low image resolution itself. "
-    "Instead, focus on evaluating the overall composition, lighting, subject flattery, and highlight "
-    "suitability as if it were a high-resolution photo.\n\n"
-    "Grade the photo from 0 to 100 based on the following criteria:\n"
-    "1. Composition: Is the framing clean and aesthetic? (Lower score for awkward crops, clutter, bad angles, distracting background elements).\n"
-    "2. Lighting & Exposure: Is it well-exposed? (Lower score for heavy underexposure, overexposure, harsh unflattering shadows/highlights).\n"
-    "3. Subject/Expression: If the photo features people, do they look natural, expressive, and flattering (no eyes closed, mid-speech, or awkward/unflattering faces)? If it features other subjects (landscapes, objects, animals), are they compelling and well-captured?\n"
-    "4. Highlight Suitability: Is this a photo someone would want in a showcase album?\n\n"
-    "Scoring Guide:\n"
-    "- 90-100: Professional/stunning quality, perfect composition, lighting, and subject framing/expression.\n"
-    "- 75-89: Very good quality, nice composition/lighting, expressive subject, minor imperfections.\n"
-    "- 50-74: Decent snapshot, acceptable but lacks professional aesthetic, or has minor composition/lighting issues.\n"
-    "- 20-49: Poor quality, bad lighting, or awkward framing/expression.\n"
-    "- 0-19: Accidental, blank, or completely ruined photo.\n\n"
-    "You must return a JSON object with 'score' (integer 0-100) and 'reason' (brief 1-sentence explanation of the score)."
-)
 
 # ANSI escape codes for terminal coloring
 COLOR_RESET = "\033[0m"
@@ -586,13 +537,13 @@ def call_gemini_api(
                 return json.loads(text_out)
             elif r.status_code == 429:
                 print(
-                    f"\n[Gemini API] Rate limit hit (429). Details: {r.text[:300]}\nRetrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                    f"\n[Gemini API] Rate limit hit (429). Details: {r.text[:300]}\nRetrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 time.sleep(backoff)
                 backoff *= 2.0
             elif r.status_code >= 500:
                 print(
-                    f"\n[Gemini API] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                    f"\n[Gemini API] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 time.sleep(backoff)
                 backoff *= 1.5
@@ -605,7 +556,7 @@ def call_gemini_api(
             if attempt == max_retries - 1:
                 raise e
             print(
-                f"\n[Gemini API] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                f"\n[Gemini API] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
             )
             time.sleep(backoff)
             backoff *= 1.5
@@ -661,13 +612,13 @@ def call_openai_api(api_key, base_url, model_name, image_bytes, max_retries=5, i
                 return json.loads(text_out)
             elif r.status_code == 429:
                 print(
-                    f"\n[OpenAI API] Rate limit hit (429). Details: {r.text[:300]}\nRetrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                    f"\n[OpenAI API] Rate limit hit (429). Details: {r.text[:300]}\nRetrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 time.sleep(backoff)
                 backoff *= 2.0
             elif r.status_code >= 500:
                 print(
-                    f"\n[OpenAI API] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                    f"\n[OpenAI API] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 time.sleep(backoff)
                 backoff *= 1.5
@@ -679,7 +630,7 @@ def call_openai_api(api_key, base_url, model_name, image_bytes, max_retries=5, i
             if attempt == max_retries - 1:
                 raise e
             print(
-                f"\n[OpenAI API] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                f"\n[OpenAI API] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
             )
             time.sleep(backoff)
             backoff *= 1.5
@@ -888,13 +839,13 @@ def call_gemini_api_stage2(
                 return {"raw_score": float(score), "reason": reason}
             elif r.status_code == 429:
                 print(
-                    f"\n[Gemini API Stage 2] Rate limit hit (429). Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                    f"\n[Gemini API Stage 2] Rate limit hit (429). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 time.sleep(backoff)
                 backoff *= 2.0
             elif r.status_code >= 500:
                 print(
-                    f"\n[Gemini API Stage 2] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                    f"\n[Gemini API Stage 2] Server error ({r.status_code}). Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
                 )
                 time.sleep(backoff)
                 backoff *= 2.0
@@ -907,7 +858,7 @@ def call_gemini_api_stage2(
             if attempt == max_retries - 1:
                 raise e
             print(
-                f"\n[Gemini API Stage 2] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt+1}/{max_retries})..."
+                f"\n[Gemini API Stage 2] Connection error: {e}. Retrying in {backoff:.1f}s (Attempt {attempt + 1}/{max_retries})..."
             )
             time.sleep(backoff)
             backoff *= 2.0
@@ -1121,7 +1072,7 @@ def add_assets_to_album(immich_url, api_key, album_id, asset_ids):
     for i in range(0, len(asset_ids), chunk_size):
         chunk = list(set(asset_ids[i : i + chunk_size]))  # deduplicate
         payload = {"ids": chunk}
-        print(f"Adding chunk {i//chunk_size + 1} ({len(chunk)} items) to album...")
+        print(f"Adding chunk {i // chunk_size + 1} ({len(chunk)} items) to album...")
         r = requests.put(url, json=payload, headers=headers, timeout=30)
         r.raise_for_status()
 
