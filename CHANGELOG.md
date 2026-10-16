@@ -2,6 +2,57 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-10-16)
+
+### Chores
+
+- **repo**: Consolidate tests under tests/, remove dead root files, and add GLOSSARY.md
+  ([`b4e9d16`](https://github.com/jbelew/immich-aesthetic-scorer/commit/b4e9d16b5c7e907b7f2cef43a9be5cb2c5bba537))
+
+- **standards**: Add two-tier comment standards, ruff pydocstyle checks, and CI parity
+  ([`8ed0e75`](https://github.com/jbelew/immich-aesthetic-scorer/commit/8ed0e75bb06343553b2b06f5668f0641b751b82e))
+
+- **test**: Wire pytest into pre-commit/CI, mock torch in siglip test, and update gh issue docs
+  ([`5b4c641`](https://github.com/jbelew/immich-aesthetic-scorer/commit/5b4c6410cd2f20e1b75d20ea5e76678cdf4954a0))
+
+### Features
+
+- **evaluators**: Implement unified image evaluation engine and model adapters
+  ([#6](https://github.com/jbelew/immich-aesthetic-scorer/pull/6),
+  [`25d9e68`](https://github.com/jbelew/immich-aesthetic-scorer/commit/25d9e68d8327f53959934b28c1def22a5d5ac623))
+
+- **gateway**: Implement connection-pooled Immich HTTP gateway adapter
+  ([#7](https://github.com/jbelew/immich-aesthetic-scorer/pull/7),
+  [`32012a2`](https://github.com/jbelew/immich-aesthetic-scorer/commit/32012a2bd5aa881c4eb5bda21962c5d21b621f53))
+
+- **pipeline**: Deepen ScorePipeline.run orchestration and narrow public interface
+  ([#11](https://github.com/jbelew/immich-aesthetic-scorer/pull/11),
+  [`d2b80e2`](https://github.com/jbelew/immich-aesthetic-scorer/commit/d2b80e24ef6f041e206a9404bcf8feb30713d73d))
+
+- **store**: Implement thread-safe evaluation cache store
+  ([#5](https://github.com/jbelew/immich-aesthetic-scorer/pull/5),
+  [`61860dd`](https://github.com/jbelew/immich-aesthetic-scorer/commit/61860dd49aba38d1e22d4c8ecc25d6304e590dce))
+
+- **store,pipeline**: Preserve and surface Stage 1 and Stage 2 qualitative critiques
+  ([#12](https://github.com/jbelew/immich-aesthetic-scorer/pull/12),
+  [`ab6bb35`](https://github.com/jbelew/immich-aesthetic-scorer/commit/ab6bb35665ec9d9b7394d58fabe1cb9c2b1b4730))
+
+### Performance Improvements
+
+- **gateway,driver**: Batch star rating updates and support negatable boolean CLI flags
+  ([`bf632a3`](https://github.com/jbelew/immich-aesthetic-scorer/commit/bf632a34acaff9ebcfffdb54177b02f5830a87ca))
+
+### Refactoring
+
+- **driver**: Retire legacy pass-through functions and cross-seam global state
+  ([#10](https://github.com/jbelew/immich-aesthetic-scorer/pull/10),
+  [`1efc51e`](https://github.com/jbelew/immich-aesthetic-scorer/commit/1efc51e7fefc148eb1b24afebe73391396825023))
+
+- **driver**: Wire deep modules into score_assets.py CLI driver
+  ([#8](https://github.com/jbelew/immich-aesthetic-scorer/pull/8),
+  [`ecf6d05`](https://github.com/jbelew/immich-aesthetic-scorer/commit/ecf6d058471080a76f3ada4d008b6b1040f1e8b9))
+
+
 ## v1.4.0 (2026-09-30)
 
 ### Documentation
