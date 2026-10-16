@@ -331,13 +331,17 @@ class ScorePipeline:
         for asset in assets:
             raw_s1 = store.get_stage1(asset, model_id=s1_model_name, force=force_score)
             if raw_s1 is not None:
-                stage1_results.append(
-                    {
-                        "id": asset["id"],
-                        "asset": asset,
-                        "raw_score_stage1": float(raw_s1),
-                    }
+                reason_s1 = store.get_stage1_reason(
+                    asset, model_id=s1_model_name, force=force_score
                 )
+                entry_item: dict[str, Any] = {
+                    "id": asset["id"],
+                    "asset": asset,
+                    "raw_score_stage1": float(raw_s1),
+                }
+                if reason_s1 is not None:
+                    entry_item["reason_stage1"] = reason_s1
+                stage1_results.append(entry_item)
             else:
                 assets_to_score.append(asset)
 
@@ -369,12 +373,18 @@ class ScorePipeline:
                 raw_bytes = thumbnail_loader(asset_id)
                 img_bytes = resize_image_bytes(raw_bytes, max_dim=evaluator.required_max_dimension)
                 eval_res = evaluator.evaluate(img_bytes)
-                store.record_stage1(asset_item, eval_res.raw_score, s1_model_name)
+                store.record_stage1(
+                    asset_item,
+                    eval_res.raw_score,
+                    s1_model_name,
+                    reason=eval_res.reason,
+                )
                 if scorer_type == "local" and delay > 0:
                     time.sleep(delay)
                 return {
                     "id": asset_id,
                     "raw_score_stage1": eval_res.raw_score,
+                    "reason_stage1": eval_res.reason,
                     "asset": asset_item,
                     "status": "success",
                 }
@@ -533,7 +543,13 @@ class ScorePipeline:
             item["rating"] = score_to_stars(score)
             if raw is not None:
                 z = (float(raw) - mean) / std
-                item["reason"] = f"Local CLIP score: {float(raw):.2f}/10.0 (z-score: {z:.2f})"
+                reason_s1 = item.get("reason_stage1")
+                if reason_s1:
+                    item["reason"] = (
+                        f"{reason_s1} (Stage 1 raw: {float(raw):.2f}/10.0, z-score: {z:.2f})"
+                    )
+                else:
+                    item["reason"] = f"Local CLIP score: {float(raw):.2f}/10.0 (z-score: {z:.2f})"
             elif "reason" not in item:
                 item["reason"] = f"Aesthetic score: {s1_norm:.1f}"
         return assets
@@ -574,10 +590,15 @@ class ScorePipeline:
                 )
                 z1 = (float(raw_s1) - mean_s1) / std_s1 if raw_s1 is not None else 0.0
                 z2 = (raw_s2 - self.s2_stats.mean) / self.s2_stats.std
-                item["reason"] = (
+                base_reason = (
                     f"Two-stage: S1={s1_norm:.1f} (raw: {float(raw_s1 or 0.0):.2f}, z: {z1:.2f}), "
                     f"S2={s2_norm:.1f} (raw: {raw_s2:.2f}, z: {z2:.2f})"
                 )
+                reason_s2 = item.get("reason_stage2")
+                if reason_s2:
+                    item["reason"] = f"{base_reason} — {reason_s2}"
+                else:
+                    item["reason"] = base_reason
             else:
                 combined = _fuse_scores(
                     s1_norm,
@@ -614,6 +635,7 @@ class ScorePipeline:
                 model_id_stage2=model_id_stage2 if raw_s2_val is not None else None,
                 reason_stage2=item.get("reason_stage2") if raw_s2_val is not None else None,
                 updated_at=get_asset_mod_time(item["asset"]),
+                reason_stage1=item.get("reason_stage1"),
             )
         store.flush()
 

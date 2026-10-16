@@ -88,7 +88,7 @@ def test_run_single_stage_evaluates_downscales_calibrates_and_persists_to_store(
 
     eval_iter = iter(raw_scores)
     s1_eval = FakeEvaluator(
-        scores=lambda _b: next(eval_iter),
+        scores=lambda _b: EvaluationResult(raw_score=next(eval_iter), reason=None),
         model_id="fake-s1",
         required_max_dimension=512,
     )
@@ -294,6 +294,8 @@ def test_run_two_stage_candidate_promotion_and_continuous_50_fallback_fusion():
     assert "s2_norm" in by_id["img10"]
     assert "s2_norm" in by_id["img9"]
     assert "Two-stage:" in by_id["img10"]["reason"]
+    assert by_id["img10"]["reason"].endswith(" — Crisp details")
+    assert by_id["img9"]["reason"].endswith(" — Soft edges")
 
     # Non-candidates receive continuous fallback S2 = 50.0:
     # combined = (1 - 0.4) * s1_norm + 0.4 * 50.0
@@ -334,6 +336,96 @@ def test_run_two_stage_candidate_promotion_and_continuous_50_fallback_fusion():
     cont_by_id = {item["id"]: item for item in cont_res.scored_assets}
     assert cont_by_id["c2"]["s2_norm"] == pytest.approx(50.0)
     assert cont_by_id["c2"]["score"] == cont_by_id["nc"]["score"]
+    # Candidate with None reason_stage2 does not append " — "
+    assert " — " not in cont_by_id["c2"]["reason"]
+
+
+def test_run_single_stage_preserves_and_formats_stage1_reason_cached_and_uncached():
+    assets = [
+        {"id": "cached-llm", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+        {"id": "fresh-llm", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+        {"id": "fresh-local", "fileModifiedAt": "2026-07-25T10:00:00Z"},
+    ]
+    store = EvaluationStore.in_memory()
+    store.record_stage1(
+        assets[0],
+        raw_score=8.0,
+        model_id="gemini-2.5-flash",
+        reason="Warm sunset tones",
+    )
+
+    s1_map = {
+        b"fresh-llm": EvaluationResult(raw_score=6.0, reason="Balanced composition"),
+        b"fresh-local": EvaluationResult(raw_score=4.0, reason=None),
+    }
+    s1_eval = FakeEvaluator(
+        scores=s1_map,
+        model_id="gemini-2.5-flash",
+        required_max_dimension=None,
+    )
+    pipeline = ScorePipeline(min_std_s1=1.0)
+
+    # Raw scores: [8.0, 6.0, 4.0] -> mean=6.0, variance=(4+0+4)/3=2.6667, std=sqrt(8/3)~1.632993
+    res = pipeline.run(
+        assets=assets,
+        store=store,
+        stage1_evaluator=s1_eval,
+        thumbnail_loader=lambda aid: aid.encode(),
+        concurrency=1,
+        scorer_type="gemini",
+    )
+
+    by_id = {item["id"]: item for item in res.scored_assets}
+    std = res.stage1_stats.std
+    z_cached = (8.0 - 6.0) / std
+    z_fresh = (6.0 - 6.0) / std
+    z_local = (4.0 - 6.0) / std
+
+    assert by_id["cached-llm"]["reason"] == (
+        f"Warm sunset tones (Stage 1 raw: 8.00/10.0, z-score: {z_cached:.2f})"
+    )
+    assert by_id["fresh-llm"]["reason"] == (
+        f"Balanced composition (Stage 1 raw: 6.00/10.0, z-score: {z_fresh:.2f})"
+    )
+    assert by_id["fresh-local"]["reason"] == (
+        f"Local CLIP score: 4.00/10.0 (z-score: {z_local:.2f})"
+    )
+
+    # Verify EvaluationStore persisted reason_stage1 and final reason
+    entry_cached = store.get_entry("cached-llm")
+    entry_fresh = store.get_entry("fresh-llm")
+    assert entry_cached is not None
+    assert entry_cached["reason_stage1"] == "Warm sunset tones"
+    assert entry_cached["reason"] == by_id["cached-llm"]["reason"]
+    assert entry_fresh is not None
+    assert entry_fresh["reason_stage1"] == "Balanced composition"
+    assert entry_fresh["reason"] == by_id["fresh-llm"]["reason"]
+
+    # Re-running with a different model ID or drifted timestamp invalidates cached reason_stage1
+    drifted_cached = {"id": "cached-llm", "fileModifiedAt": "2026-07-26T12:00:00Z"}
+    rerun_eval = FakeEvaluator(
+        scores={
+            b"cached-llm": EvaluationResult(raw_score=9.0, reason="Updated timestamp critique"),
+            b"fresh-llm": EvaluationResult(raw_score=7.0, reason="New model critique"),
+        },
+        model_id="gpt-4o-mini",
+        required_max_dimension=None,
+    )
+    rerun_res = pipeline.run(
+        assets=[drifted_cached, assets[1]],
+        store=store,
+        stage1_evaluator=rerun_eval,
+        thumbnail_loader=lambda aid: aid.encode(),
+        concurrency=1,
+        scorer_type="openai",
+    )
+    rerun_by_id = {item["id"]: item for item in rerun_res.scored_assets}
+    assert rerun_by_id["cached-llm"]["reason"].startswith(
+        "Updated timestamp critique (Stage 1 raw: 9.00/10.0"
+    )
+    assert rerun_by_id["fresh-llm"]["reason"].startswith(
+        "New model critique (Stage 1 raw: 7.00/10.0"
+    )
 
 
 def test_run_respects_cache_only_and_force_score():
@@ -364,6 +456,7 @@ def test_run_respects_cache_only_and_force_score():
     assert len(s1_eval.evaluated_images) == 0
     assert len(s2_eval.evaluated_images) == 0
     assert [item["id"] for item in cache_only_res.scored_assets] == ["cached"]
+    assert cache_only_res.scored_assets[0]["reason"].endswith(" — Cached S2")
 
     # 2. force_score=True re-evaluates even cached assets
     force_res = pipeline.run(

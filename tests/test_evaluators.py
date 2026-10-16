@@ -130,7 +130,7 @@ class TestLocalClipEvaluator:
         res = evaluator.evaluate(img_bytes)
         assert res.raw_score == 8.5  # 4.25 * 2.0
         assert res.score == 85
-        assert res.reason == "Local CLIP score: 8.50/10.0"
+        assert res.reason is None
         mock_model.to.assert_called_once_with("cuda")
         mock_torch.no_grad.assert_called_once()
 
@@ -169,7 +169,7 @@ class TestLocalClipEvaluator:
 
         assert res.raw_score == 7.84
         assert res.score == 78
-        assert res.reason == "Local CLIP score: 7.84/10.0"
+        assert res.reason is None
         mock_torch.no_grad.assert_called_once()
 
     def test_evaluates_aesthetics_predictor_v2(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,7 +214,7 @@ class TestLocalClipEvaluator:
 
         assert res.raw_score == 6.4
         assert res.score == 64
-        assert res.reason == "Local CLIP score: 6.40/10.0"
+        assert res.reason is None
         mock_torch.no_grad.assert_called_once()
 
 
@@ -257,7 +257,7 @@ class TestPyIQAEvaluator:
 
         res = evaluator.evaluate(img_bytes)
         assert res.raw_score == 67.89
-        assert res.reason == "Local technical score: 67.89"
+        assert res.reason is None
         mock_pyiqa.create_metric.assert_called_once_with("musiq-spaq", device="cuda")
         mock_torch.no_grad.assert_called_once()
 

@@ -191,14 +191,48 @@ class EvaluationStore:
                 raw = extract_raw_score_from_reason(entry.get("reason"))
             return float(raw) if raw is not None else None
 
+    def _get_stage_reason(
+        self,
+        asset: dict[str, Any] | str,
+        *,
+        model_key: str,
+        score_key: str,
+        reason_key: str,
+        model_id: str,
+        force: bool,
+    ) -> str | None:
+        with self._lock:
+            entry = self._get_validated_entry(asset, model_key, model_id, force)
+            if not entry or entry.get(score_key) is None:
+                return None
+            reason = entry.get(reason_key)
+            return str(reason) if reason is not None else None
+
+    def get_stage1_reason(
+        self,
+        asset: dict[str, Any] | str,
+        model_id: str,
+        force: bool = False,
+    ) -> str | None:
+        """Retrieves the cached Stage 1 reason if the Stage 1 entry is valid."""
+        return self._get_stage_reason(
+            asset,
+            model_key="model_id_stage1",
+            score_key="raw_score_stage1",
+            reason_key="reason_stage1",
+            model_id=model_id,
+            force=force,
+        )
+
     def record_stage1(
         self,
         asset: dict[str, Any] | str,
         raw_score: float,
         model_id: str,
         updated_at: str | None = None,
+        reason: str | None = None,
     ) -> None:
-        """Records a Stage 1 evaluation score."""
+        """Records a Stage 1 evaluation score and optional reason."""
         asset_id = self._resolve_asset_id(asset)
         mod_time = updated_at if updated_at is not None else get_asset_mod_time(asset)
         with self._lock:
@@ -216,6 +250,7 @@ class EvaluationStore:
 
             entry["raw_score_stage1"] = float(raw_score)
             entry["model_id_stage1"] = model_id
+            entry["reason_stage1"] = reason
             if mod_time is not None or "updatedAt" not in entry:
                 entry["updatedAt"] = mod_time
 
@@ -244,12 +279,14 @@ class EvaluationStore:
         force: bool = False,
     ) -> str | None:
         """Retrieves the cached Stage 2 reason if Stage 2 entry is valid."""
-        with self._lock:
-            entry = self._get_validated_entry(asset, "model_id_stage2", model_id, force)
-            if not entry or entry.get("raw_score_stage2") is None:
-                return None
-            reason = entry.get("reason_stage2")
-            return str(reason) if reason is not None else None
+        return self._get_stage_reason(
+            asset,
+            model_key="model_id_stage2",
+            score_key="raw_score_stage2",
+            reason_key="reason_stage2",
+            model_id=model_id,
+            force=force,
+        )
 
     def record_stage2(
         self,
@@ -281,15 +318,30 @@ class EvaluationStore:
         model_id_stage2: str | None = None,
         reason_stage2: str | None = None,
         updated_at: str | None = None,
+        reason_stage1: str | None = None,
     ) -> None:
         """Records final calibrated score and metadata for an asset."""
         with self._lock:
             existing = self._data.get(asset_id)
             entry = dict(existing) if existing else {}
+            prev_model_s1 = entry.get("model_id_stage1")
+            prev_updated_at = entry.get("updatedAt")
+            s1_invalidated = (prev_model_s1 is not None and prev_model_s1 != model_id_stage1) or (
+                prev_updated_at is not None
+                and updated_at is not None
+                and prev_updated_at != updated_at
+            )
+
             entry["score"] = int(score)
             entry["raw_score_stage1"] = float(raw_score_stage1)
             entry["model_id_stage1"] = model_id_stage1
             entry["reason"] = reason
+            if reason_stage1 is not None:
+                entry["reason_stage1"] = reason_stage1
+            elif s1_invalidated:
+                entry["reason_stage1"] = None
+            elif "reason_stage1" in entry:
+                entry["reason_stage1"] = entry.get("reason_stage1")
             if updated_at is not None:
                 entry["updatedAt"] = updated_at
             if raw_score_stage2 is not None or "raw_score_stage2" in entry:
@@ -298,7 +350,9 @@ class EvaluationStore:
                 )
                 entry["model_id_stage2"] = model_id_stage2 if raw_score_stage2 is not None else None
                 entry["reason_stage2"] = (
-                    reason_stage2 if reason_stage2 is not None else entry.get("reason_stage2")
+                    reason_stage2
+                    if reason_stage2 is not None
+                    else (entry.get("reason_stage2") if raw_score_stage2 is not None else None)
                 )
             if entry != existing:
                 self._data[asset_id] = entry

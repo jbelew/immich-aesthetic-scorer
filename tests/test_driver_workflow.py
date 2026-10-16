@@ -165,8 +165,13 @@ class TestSingleStageWorkflow:
         store = EvaluationStore.in_memory()
         store.record_stage1(assets[0], raw_score=5.0, model_id="fake-s1")
 
-        # Give a2 raw score 9.0 and a3 raw score 7.0
-        call_scores = [9.0, 7.0]
+        # Give a2 raw score 9.0 (local None reason) and a3 raw score 7.0 (local None reason)
+        from immich_aesthetic_scorer.evaluators import EvaluationResult
+
+        call_scores = [
+            EvaluationResult(raw_score=9.0, reason=None),
+            EvaluationResult(raw_score=7.0, reason=None),
+        ]
         s1_eval = FakeEvaluator(
             scores=lambda _b: call_scores.pop(0),
             model_id="fake-s1",
@@ -218,6 +223,80 @@ class TestSingleStageWorkflow:
         assert entry_a2 is not None
         assert entry_a2["score"] > 50
         assert "Local CLIP score:" in entry_a2["reason"]
+
+    def test_single_stage_remote_llm_workflow_preserves_and_surfaces_stage1_critiques(
+        self,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from immich_aesthetic_scorer.evaluators import EvaluationResult, FakeEvaluator
+        from immich_aesthetic_scorer.pipeline import ScorePipeline
+        from immich_aesthetic_scorer.store import EvaluationStore
+        from score_assets import run_scoring_workflow
+
+        assets = [
+            {
+                "id": "llm-cached",
+                "type": "IMAGE",
+                "originalFileName": "cached.jpg",
+                "fileModifiedAt": "2026-07-24T10:00:00Z",
+                "fileCreatedAt": "2026-07-24T10:00:00Z",
+            },
+            {
+                "id": "llm-fresh",
+                "type": "IMAGE",
+                "originalFileName": "fresh.jpg",
+                "fileModifiedAt": "2026-07-24T10:05:00Z",
+                "fileCreatedAt": "2026-07-24T10:05:00Z",
+            },
+        ]
+        gateway = MagicMock()
+        gateway.fetch_image_assets.return_value = assets
+        gateway.download_thumbnail.return_value = _make_jpeg_bytes(400, 300)
+
+        store = EvaluationStore.in_memory()
+        store.record_stage1(
+            assets[0],
+            raw_score=8.5,
+            model_id="gemini-2.5-flash",
+            reason="Cached golden hour portrait",
+        )
+
+        s1_eval = FakeEvaluator(
+            scores=lambda _b: EvaluationResult(raw_score=6.5, reason="Fresh candid smile"),
+            model_id="gemini-2.5-flash",
+            required_max_dimension=512,
+        )
+
+        cfg = ScorerConfig(
+            immich_url="http://immich.local:2283",
+            api_key="secret",
+            person_id="person-1",
+            target_album_name="Best of Person",
+            scorer_type="gemini",
+            gemini_model="gemini-2.5-flash",
+            concurrency=1,
+            dry_run=True,
+            two_stage=False,
+        )
+
+        top_assets = run_scoring_workflow(
+            cfg,
+            gateway=gateway,
+            store=store,
+            stage1_evaluator=s1_eval,
+            pipeline=ScorePipeline(),
+        )
+
+        by_id = {item["id"]: item for item in top_assets}
+        assert by_id["llm-cached"]["reason"].startswith(
+            "Cached golden hour portrait (Stage 1 raw: 8.50/10.0, z-score:"
+        )
+        assert by_id["llm-fresh"]["reason"].startswith(
+            "Fresh candid smile (Stage 1 raw: 6.50/10.0, z-score:"
+        )
+        assert store.get_entry("llm-cached")["reason_stage1"] == "Cached golden hour portrait"  # type: ignore[index]
+        assert store.get_entry("llm-fresh")["reason_stage1"] == "Fresh candid smile"  # type: ignore[index]
 
     def test_workflow_delegates_to_pipeline_run_and_separates_rating_sync_from_deduplicated_highlights(
         self,
@@ -380,14 +459,16 @@ class TestTwoStageWorkflow:
         gateway.update_asset_rating.assert_not_called()
         gateway.ensure_album_with_assets.assert_not_called()
 
-        # Candidate entries have Two-stage reason and persisted Stage 2 metadata;
+        # Candidate entries have Two-stage reason (including appended S2 critique) and persisted Stage 2 metadata;
         # Non-candidates have Stage 1 only fallback reason
         entry_1 = store.get_entry("img-1")
         entry_2 = store.get_entry("img-2")
         entry_3 = store.get_entry("img-3")
-        assert entry_1 is not None and "Two-stage:" in entry_1["reason"]
+        assert entry_1 is not None and entry_1["reason"].startswith("Two-stage:")
+        assert entry_1["reason"].endswith(" — Cached S2 reason")
         assert entry_1["reason_stage2"] == "Cached S2 reason"
-        assert entry_2 is not None and "Two-stage:" in entry_2["reason"]
+        assert entry_2 is not None and entry_2["reason"].startswith("Two-stage:")
+        assert entry_2["reason"].endswith(" — Sharp focus")
         assert entry_2["reason_stage2"] == "Sharp focus"
         assert entry_3 is not None and "Stage 1 only:" in entry_3["reason"]
         assert len(top_assets) == 2

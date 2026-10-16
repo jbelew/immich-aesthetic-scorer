@@ -378,7 +378,7 @@ class LocalClipEvaluator:
             temp_score = int(round(raw_score * 10.0))
             return EvaluationResult(
                 raw_score=raw_score,
-                reason=f"Local CLIP score: {raw_score:.2f}/10.0",
+                reason=None,
                 score=temp_score,
             )
 
@@ -451,7 +451,7 @@ class PyIQAEvaluator:
                 val = float(score.item() if hasattr(score, "item") else score)
                 return EvaluationResult(
                     raw_score=val,
-                    reason=f"Local technical score: {val:.2f}",
+                    reason=None,
                 )
 
 

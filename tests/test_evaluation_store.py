@@ -21,6 +21,89 @@ def test_in_memory_record_and_get_stage1():
 
     score = store.get_stage1(asset, model_id="somepago/AestheticSigLIP")
     assert score == pytest.approx(7.42)
+    assert store.get_stage1_reason(asset, model_id="somepago/AestheticSigLIP") is None
+
+
+def test_stage1_reason_record_get_final_and_invalidation():
+    store = EvaluationStore.in_memory()
+    asset = {"id": "asset-1", "fileModifiedAt": "2026-07-25T12:00:00Z"}
+
+    assert store.get_stage1_reason(asset, model_id="gemini-2.5-flash") is None
+
+    store.record_stage1(
+        asset,
+        raw_score=8.5,
+        model_id="gemini-2.5-flash",
+        reason="Golden hour lighting and sharp subject.",
+    )
+
+    assert store.get_stage1(asset, model_id="gemini-2.5-flash") == pytest.approx(8.5)
+    assert (
+        store.get_stage1_reason(asset, model_id="gemini-2.5-flash")
+        == "Golden hour lighting and sharp subject."
+    )
+
+    # force=True bypasses cached Stage 1 reason
+    assert store.get_stage1_reason(asset, model_id="gemini-2.5-flash", force=True) is None
+
+    # Model ID mismatch invalidates Stage 1 reason
+    assert store.get_stage1_reason(asset, model_id="gpt-4o-mini") is None
+
+    # Asset timestamp drift invalidates Stage 1 reason
+    drifted_asset = {"id": "asset-1", "fileModifiedAt": "2026-07-26T00:00:00Z"}
+    assert store.get_stage1_reason(drifted_asset, model_id="gemini-2.5-flash") is None
+
+    # record_final preserves existing reason_stage1 when not explicitly overwritten
+    store.record_final(
+        asset_id="asset-1",
+        score=88,
+        reason="Golden hour lighting and sharp subject. (Stage 1 raw: 8.50/10.0, z-score: 1.50)",
+        raw_score_stage1=8.5,
+        model_id_stage1="gemini-2.5-flash",
+    )
+    entry = store.get_entry("asset-1")
+    assert entry is not None
+    assert entry["reason_stage1"] == "Golden hour lighting and sharp subject."
+    assert (
+        store.get_stage1_reason(asset, model_id="gemini-2.5-flash")
+        == "Golden hour lighting and sharp subject."
+    )
+
+    # record_final also accepts an explicit reason_stage1 parameter
+    store.record_final(
+        asset_id="asset-2",
+        score=91,
+        reason="Explicit critique (Stage 1 raw: 9.00/10.0, z-score: 2.00)",
+        raw_score_stage1=9.0,
+        model_id_stage1="gemini-2.5-flash",
+        reason_stage1="Explicit critique",
+        updated_at="2026-07-25T12:00:00Z",
+    )
+    assert (
+        store.get_stage1_reason(
+            {"id": "asset-2", "fileModifiedAt": "2026-07-25T12:00:00Z"},
+            model_id="gemini-2.5-flash",
+        )
+        == "Explicit critique"
+    )
+
+    # record_final clears stale reason_stage1 when model_id_stage1 changes and reason_stage1=None
+    store.record_final(
+        asset_id="asset-2",
+        score=70,
+        reason="Local CLIP score: 7.00/10.0 (z-score: 0.00)",
+        raw_score_stage1=7.0,
+        model_id_stage1="somepago/AestheticSigLIP",
+        reason_stage1=None,
+        updated_at="2026-07-25T12:00:00Z",
+    )
+    assert (
+        store.get_stage1_reason(
+            {"id": "asset-2", "fileModifiedAt": "2026-07-25T12:00:00Z"},
+            model_id="somepago/AestheticSigLIP",
+        )
+        is None
+    )
 
 
 def test_stage_isolated_model_mismatch_invalidation():
@@ -76,25 +159,47 @@ def test_asset_timestamp_drift_invalidation_and_mod_time_resolution():
 
     store = EvaluationStore.in_memory()
     original_asset = {"id": "asset-1", "fileModifiedAt": "2026-07-25T12:00:00Z"}
-    store.record_stage1(original_asset, raw_score=6.8, model_id="somepago/AestheticSigLIP")
-    store.record_stage2(original_asset, raw_score=78.0, model_id="gemini-2.5-flash")
+    store.record_stage1(
+        original_asset,
+        raw_score=6.8,
+        model_id="somepago/AestheticSigLIP",
+        reason="Original S1 critique",
+    )
+    store.record_stage2(
+        original_asset,
+        raw_score=78.0,
+        model_id="gemini-2.5-flash",
+        reason="Original S2 critique",
+    )
 
     assert store.get_stage1(original_asset, model_id="somepago/AestheticSigLIP") == pytest.approx(
         6.8
     )
+    assert (
+        store.get_stage1_reason(original_asset, model_id="somepago/AestheticSigLIP")
+        == "Original S1 critique"
+    )
     assert store.get_stage2(original_asset, model_id="gemini-2.5-flash") == pytest.approx(78.0)
+    assert (
+        store.get_stage2_reason(original_asset, model_id="gemini-2.5-flash")
+        == "Original S2 critique"
+    )
 
-    # Asset is modified with a newer timestamp -> both Stage 1 and Stage 2 are invalidated
+    # Asset is modified with a newer timestamp -> both Stage 1 and Stage 2 scores & reasons are invalidated
     modified_asset = {"id": "asset-1", "fileModifiedAt": "2026-07-26T15:30:00Z"}
     assert store.get_stage1(modified_asset, model_id="somepago/AestheticSigLIP") is None
+    assert store.get_stage1_reason(modified_asset, model_id="somepago/AestheticSigLIP") is None
     assert store.get_stage2(modified_asset, model_id="gemini-2.5-flash") is None
+    assert store.get_stage2_reason(modified_asset, model_id="gemini-2.5-flash") is None
 
-    # Re-recording Stage 1 on modified asset updates timestamp and clears stale Stage 2 score
+    # Re-recording Stage 1 on modified asset updates timestamp and clears stale Stage 2 score and reason
     store.record_stage1(modified_asset, raw_score=8.1, model_id="somepago/AestheticSigLIP")
     assert store.get_stage1(modified_asset, model_id="somepago/AestheticSigLIP") == pytest.approx(
         8.1
     )
+    assert store.get_stage1_reason(modified_asset, model_id="somepago/AestheticSigLIP") is None
     assert store.get_stage2("asset-1", model_id="gemini-2.5-flash") is None
+    assert store.get_stage2_reason("asset-1", model_id="gemini-2.5-flash") is None
 
 
 def test_legacy_cache_reason_extraction_and_fallback():
