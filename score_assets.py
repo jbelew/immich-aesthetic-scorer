@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Immich Aesthetic Scorer & Highlight Album Creator.
 
-CLI driver and backward-compatible facade coordinating `ScorePipeline`,
-`EvaluationStore`, `ImageEvaluator`, and `ImmichGateway`.
+CLI driver coordinating `ScorePipeline`, `EvaluationStore`, `ImageEvaluator`,
+and `ImmichGateway`.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,45 +22,23 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 import requests
 from tqdm import tqdm
 
-import immich_aesthetic_scorer.evaluators as _evaluators_mod
-from immich_aesthetic_scorer.evaluators import (  # noqa: F401
-    AESTHETIC_PROMPT,
-    EvaluationResult,
-    FakeEvaluator,
-    GeminiEvaluator,
+from immich_aesthetic_scorer.evaluators import (
     ImageEvaluator,
-    LocalClipEvaluator,
-    OpenAIEvaluator,
-    PyIQAEvaluator,
     RateLimiter,
-    RsinemaAestheticScorer,
     create_evaluator,
-    negotiate_torch_device,
     resize_image_bytes,
 )
-from immich_aesthetic_scorer.gateway import (  # noqa: F401
+from immich_aesthetic_scorer.gateway import (
     ImmichGateway,
     ImmichGatewayError,
-    ServerVersion,
 )
-from immich_aesthetic_scorer.pipeline import (  # noqa: F401
-    PopulationStats,
+from immich_aesthetic_scorer.pipeline import (
     ScorePipeline,
-    calculate_population_stats,
-    deduplicate_bursts,
-    fuse_scores,
-    normalize_z_score,
-    parse_asset_time,
     score_to_stars,
-    select_candidates,
 )
-from immich_aesthetic_scorer.store import (  # noqa: F401
+from immich_aesthetic_scorer.store import (
     EvaluationStore,
-    cache_lock,
-    extract_raw_score_from_reason,
     get_asset_mod_time,
-    load_cache,
-    save_cache,
 )
 
 # Suppress Hugging Face hub telemetry/symlinks warnings and other log noises
@@ -77,27 +54,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("transformers").setLevel(logging.ERROR)
-
-# Optional ML modules exposed at module scope for backward compatibility with existing tests
-torch: Any = None
-Image: Any = None
-CLIPProcessor: Any = None
-pyiqa: Any = None
-
-try:
-    import torch
-
-    # Restrict PyTorch CPU intra-op threads to prevent thread contention across parallel workers
-    torch.set_num_threads(1)
-    from PIL import Image
-    from transformers import CLIPProcessor
-except ImportError:
-    from PIL import Image
-
-try:
-    import pyiqa
-except ImportError:
-    pass
 
 # Default CLI configuration constants
 DEFAULT_GEMINI_KEY = None
@@ -116,15 +72,6 @@ COLOR_YELLOW = "\033[33m"
 COLOR_RED = "\033[31m"
 COLOR_MAGENTA = "\033[35m"
 COLOR_GRAY = "\033[90m"
-
-# Legacy module-level state preserved for backward-compatible test assertions
-local_model: Any = None
-local_processor: Any = None
-model_lock = threading.Lock()
-local_stage2_model: Any = None
-stage2_model_lock = threading.Lock()
-_cached_local_evaluator: Optional[LocalClipEvaluator] = None
-_cached_stage2_evaluator: Optional[PyIQAEvaluator] = None
 
 
 def _classify_stage2_provider(model_id: str) -> str:
@@ -153,37 +100,6 @@ def get_or_prompt(
     if not cleaned and default:
         return default
     return cleaned
-
-
-def check_immich_connection(immich_url: str, api_key: str) -> tuple[bool, Any, Optional[int]]:
-    """Verifies connection and returns `(True, major, minor)` or `(False, error_str, None)`."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    try:
-        version = gateway.verify_connection()
-        return True, version.major, version.minor
-    except ImmichGatewayError as exc:
-        if exc.status_code is not None:
-            return False, f"Status code {exc.status_code}", None
-        return False, str(exc), None
-
-
-def get_person_details(immich_url: str, api_key: str, person_id: str) -> Optional[dict[str, Any]]:
-    """Retrieves metadata of a person from Immich, or returns `None` on failure."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    try:
-        return gateway.get_person_details(person_id)
-    except ImmichGatewayError:
-        return None
-
-
-def search_people_by_name(immich_url: str, api_key: str, query: str) -> list[dict[str, Any]]:
-    """Searches Immich people by name substring, returning `[]` on error."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    try:
-        return gateway.search_people(query)
-    except ImmichGatewayError as exc:
-        print(f"Error searching people: {exc}")
-        return []
 
 
 def select_person_interactive(immich_url: str, api_key: str) -> tuple[Optional[str], Optional[str]]:
@@ -223,15 +139,6 @@ def select_person_interactive(immich_url: str, api_key: str) -> tuple[Optional[s
                     return manual_uuid, None
         except ValueError:
             print("Invalid input. Please enter a number.")
-
-
-def get_album_details(immich_url: str, api_key: str, album_id: str) -> Optional[dict[str, Any]]:
-    """Retrieves metadata of an album from Immich, or returns `None` on failure."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    try:
-        return gateway.get_album_details(album_id)
-    except ImmichGatewayError:
-        return None
 
 
 def select_album_interactive(immich_url: str, api_key: str) -> tuple[Optional[str], Optional[str]]:
@@ -275,204 +182,6 @@ def select_album_interactive(immich_url: str, api_key: str) -> tuple[Optional[st
                     return manual_uuid, None
         except ValueError:
             print("Invalid input. Please enter a number.")
-
-
-def fetch_all_image_assets(
-    immich_url: str,
-    api_key: str,
-    person_id: Optional[str] = None,
-    album_id: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    """Fetches all `IMAGE` assets for a person or album via `ImmichGateway`."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    return gateway.fetch_image_assets(person_id=person_id, album_id=album_id)
-
-
-def download_thumbnail(
-    immich_url: str,
-    api_key: str,
-    asset_id: str,
-    max_dim: Optional[int] = 512,
-) -> bytes:
-    """Downloads an uncropped preview thumbnail from Immich and optionally downscales it."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    raw_bytes = gateway.download_thumbnail(asset_id)
-    return resize_image_bytes(raw_bytes, max_dim=max_dim)
-
-
-def call_gemini_api(
-    api_key: str,
-    image_bytes: bytes,
-    model_name: str = "gemini-2.5-flash",
-    max_retries: int = 5,
-    initial_backoff: float = 4.0,
-) -> dict[str, Any]:
-    """Evaluates image aesthetic quality via `GeminiEvaluator` (0–100 integer score)."""
-    evaluator = GeminiEvaluator(
-        api_key=api_key,
-        model_id=model_name,
-        max_retries=max_retries,
-        initial_backoff=initial_backoff,
-        raw_scale=1.0,
-        session=requests,
-    )
-    res = evaluator.evaluate(image_bytes)
-    return {"score": res.score, "reason": res.reason}
-
-
-def call_openai_api(
-    api_key: str,
-    base_url: str,
-    model_name: str,
-    image_bytes: bytes,
-    max_retries: int = 5,
-    initial_backoff: float = 4.0,
-) -> dict[str, Any]:
-    """Evaluates image aesthetic quality via `OpenAIEvaluator` (0–100 integer score)."""
-    evaluator = OpenAIEvaluator(
-        api_key=api_key,
-        base_url=base_url,
-        model_id=model_name,
-        max_retries=max_retries,
-        initial_backoff=initial_backoff,
-        raw_scale=1.0,
-        session=requests,
-    )
-    res = evaluator.evaluate(image_bytes)
-    return {"score": res.score, "reason": res.reason}
-
-
-def score_image_local(image_bytes: bytes, model_id: str) -> dict[str, Any]:
-    """Evaluates image aesthetics locally using `LocalClipEvaluator` (0.0–10.0 raw scale).
-
-    Synchronizes module-level ML bindings (`torch`, `CLIPProcessor`, `RsinemaAestheticScorer`,
-    `Image`) with `immich_aesthetic_scorer.evaluators` so unit tests patching `score_assets.*`
-    intercept model loading and inference.
-    """
-    global local_model, local_processor, _cached_local_evaluator
-
-    with model_lock:
-        _evaluators_mod.torch = torch
-        _evaluators_mod.CLIPProcessor = CLIPProcessor
-        _evaluators_mod.RsinemaAestheticScorer = RsinemaAestheticScorer
-        _evaluators_mod.Image = Image
-
-        if (
-            local_model is None
-            or _cached_local_evaluator is None
-            or _cached_local_evaluator.model_id != model_id
-        ):
-            _cached_local_evaluator = LocalClipEvaluator(model_id=model_id)
-
-        result = _cached_local_evaluator.evaluate(image_bytes)
-        local_model = getattr(_cached_local_evaluator, "_model", None)
-        local_processor = getattr(_cached_local_evaluator, "_processor", None)
-        return result.to_dict()
-
-
-def call_gemini_api_stage2(
-    api_key: str,
-    image_bytes: bytes,
-    model_name: str = "gemini-2.5-flash",
-    max_retries: int = 5,
-    initial_backoff: float = 4.0,
-) -> dict[str, Any]:
-    """Evaluates Stage 2 aesthetics via `GeminiEvaluator` (0.0–100.0 raw score)."""
-    evaluator = GeminiEvaluator(
-        api_key=api_key,
-        model_id=model_name,
-        max_retries=max_retries,
-        initial_backoff=initial_backoff,
-        raw_scale=1.0,
-        session=requests,
-    )
-    res = evaluator.evaluate(image_bytes)
-    return {"raw_score": res.raw_score, "reason": res.reason}
-
-
-def call_openai_api_stage2(
-    api_key: str,
-    base_url: str,
-    model_name: str,
-    image_bytes: bytes,
-    max_retries: int = 5,
-    initial_backoff: float = 4.0,
-) -> dict[str, Any]:
-    """Evaluates Stage 2 aesthetics via `OpenAIEvaluator` (0.0–100.0 raw score)."""
-    evaluator = OpenAIEvaluator(
-        api_key=api_key,
-        base_url=base_url,
-        model_id=model_name,
-        max_retries=max_retries,
-        initial_backoff=initial_backoff,
-        raw_scale=1.0,
-        session=requests,
-    )
-    res = evaluator.evaluate(image_bytes)
-    return {"raw_score": res.raw_score, "reason": res.reason}
-
-
-def score_image_stage2(
-    image_bytes: bytes,
-    model_name: str = "musiq-spaq",
-    gemini_key: Optional[str] = None,
-    gemini_model: Optional[str] = None,
-    openai_key: Optional[str] = None,
-    openai_url: Optional[str] = None,
-    openai_model: Optional[str] = None,
-) -> dict[str, Any]:
-    """Evaluates Stage 2 technical or aesthetic quality via `create_evaluator`."""
-    global local_stage2_model, _cached_stage2_evaluator
-
-    _evaluators_mod.pyiqa = pyiqa
-    provider = _classify_stage2_provider(model_name)
-    if provider == "local":
-        with stage2_model_lock:
-            if (
-                local_stage2_model is None
-                or _cached_stage2_evaluator is None
-                or _cached_stage2_evaluator.model_id != model_name
-            ):
-                _cached_stage2_evaluator = PyIQAEvaluator(model_id=model_name)
-            res = _cached_stage2_evaluator.evaluate(image_bytes)
-            local_stage2_model = getattr(_cached_stage2_evaluator, "_metric", None)
-            return {"raw_score": res.raw_score, "reason": res.reason}
-
-    evaluator = create_evaluator(
-        stage=2,
-        stage2_model=model_name,
-        gemini_key=gemini_key,
-        gemini_model=gemini_model or "gemini-2.5-flash",
-        openai_key=openai_key,
-        openai_url=openai_url or "https://api.openai.com/v1",
-        openai_model=openai_model or "gpt-4o-mini",
-        session=requests,
-    )
-    res = evaluator.evaluate(image_bytes)
-    return {"raw_score": res.raw_score, "reason": res.reason}
-
-
-def get_or_create_album(immich_url: str, api_key: str, album_name: str) -> str:
-    """Retrieves an existing Immich album by name or creates a new one if missing."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    return gateway.ensure_album_with_assets(album_name, [])
-
-
-def add_assets_to_album(
-    immich_url: str, api_key: str, album_id: str, asset_ids: Sequence[str]
-) -> None:
-    """Registers a sequence of asset IDs into an existing Immich album in 100-item batches."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    gateway.add_assets_to_album(album_id, asset_ids)
-
-
-def update_asset_rating(immich_url: str, api_key: str, asset_id: str, rating: int) -> None:
-    """Updates the native star rating (`1–5`) of an asset on the Immich server."""
-    gateway = ImmichGateway(immich_url, api_key, session=requests)
-    try:
-        gateway.update_asset_rating(asset_id, rating)
-    except Exception as exc:
-        print(f"\nWarning: Failed to update rating in Immich for asset {asset_id}: {exc}")
 
 
 @dataclass

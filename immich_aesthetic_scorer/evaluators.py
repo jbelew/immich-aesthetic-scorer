@@ -24,6 +24,7 @@ pyiqa: Any = None
 try:
     import torch
 
+    # Restrict PyTorch CPU intra-op threads to prevent thread contention across parallel workers
     torch.set_num_threads(1)
     import torch.nn as nn
     from transformers import CLIPProcessor, CLIPVisionModel
