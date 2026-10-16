@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.5.1 (2026-10-16)
+
+### Bug Fixes
+
+- **ci**: Install optional ml dependencies in CI and remove hardcoded pyright venv
+  ([`7c60e4b`](https://github.com/jbelew/immich-aesthetic-scorer/commit/7c60e4b40f623e31d237216e45c75cda01ba6256))
+
+
 ## v1.5.0 (2026-10-16)
 
 ### Chores
