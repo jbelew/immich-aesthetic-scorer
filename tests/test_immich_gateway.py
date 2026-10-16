@@ -289,6 +289,25 @@ class TestStarRatingAndMetadataLookups:
 
         assert exc_info.value.status_code == 400
 
+    def test_update_assets_rating_batches_in_100_item_chunks_and_deduplicates(self) -> None:
+        session = MagicMock()
+        session.headers = {}
+        session.put.return_value = FakeResponse(status_code=204)
+
+        gateway = ImmichGateway("http://immich.local:2283", "secret-key", session=session)
+        # 150 unique IDs + 1 duplicate across boundary -> 2 PUT batches (100 + 50)
+        ids = [f"id-{i}" for i in range(150)] + ["id-0"]
+        gateway.update_assets_rating(ids, rating=4)
+
+        assert session.put.call_count == 2
+        first_call = session.put.call_args_list[0]
+        second_call = session.put.call_args_list[1]
+        assert first_call.kwargs["json"] == {"ids": [f"id-{i}" for i in range(100)], "rating": 4}
+        assert second_call.kwargs["json"] == {
+            "ids": [f"id-{i}" for i in range(100, 150)],
+            "rating": 4,
+        }
+
     def test_retrieves_person_and_album_metadata(self) -> None:
         session = MagicMock()
         session.headers = {}

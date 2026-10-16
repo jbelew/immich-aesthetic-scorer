@@ -540,13 +540,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dry-run",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=None,
-        help="Download and score assets but do not make changes to albums in Immich",
+        help="Download and score assets but do not make changes to albums or ratings in Immich",
     )
     parser.add_argument(
         "--force-score",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=None,
         help="Force re-scoring of already cached assets",
     )
@@ -571,7 +571,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--write-ratings",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=None,
         help="Update the star rating (1-5) of processed assets in Immich",
     )
@@ -582,13 +582,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--use-cache-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=None,
         help="Only compile the album using already-cached images, skipping scoring of uncached ones",
     )
     parser.add_argument(
         "--two-stage",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=None,
         help="Enable two-stage scoring using a fast model first, then a high-resolution IQA model on top candidates",
     )
@@ -960,20 +960,27 @@ def _sync_star_ratings(
         f"Syncing calibrated star ratings (1-5) to Immich in parallel using {concurrency} threads..."
     )
 
-    def _update_worker(asset_res: dict[str, Any]) -> bool:
+    # Group assets by target star rating (1..5) so ImmichGateway.update_assets_rating
+    # can send 100-item batch PUT /api/assets payloads instead of 1 request per asset.
+    buckets: dict[int, list[str]] = {}
+    for asset_res in scored_assets:
+        stars = int(asset_res.get("rating") or score_to_stars(asset_res["score"]))
+        buckets.setdefault(stars, []).append(str(asset_res["id"]))
+
+    def _update_bucket(item: tuple[int, list[str]]) -> bool:
+        stars, ids = item
         try:
-            stars = int(asset_res.get("rating") or score_to_stars(asset_res["score"]))
-            gateway.update_asset_rating(str(asset_res["id"]), stars)
+            gateway.update_assets_rating(ids, stars)
             return True
         except Exception as exc:
-            print(f"Warning: Failed to update rating for asset {asset_res['id']}: {exc}")
+            print(f"Warning: Failed to update {stars}-star rating batch ({len(ids)} assets): {exc}")
             return False
 
-    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as rating_executor:
-        rating_futures = [rating_executor.submit(_update_worker, res) for res in scored_assets]
+    with ThreadPoolExecutor(max_workers=max(1, min(concurrency, len(buckets) or 1))) as executor:
+        futures = [executor.submit(_update_bucket, item) for item in sorted(buckets.items())]
         for f in tqdm(
-            as_completed(rating_futures),
-            total=len(rating_futures),
+            as_completed(futures),
+            total=len(futures),
             desc="Syncing Ratings",
         ):
             f.result()
@@ -1138,7 +1145,10 @@ def run_scoring_workflow(
         print("Cache updated successfully with combined scores!")
 
     if cfg.write_ratings:
-        _sync_star_ratings(scored_assets, gateway, cfg.concurrency)
+        if cfg.dry_run:
+            print("\n[Dry Run] skipping star ratings sync to Immich.")
+        else:
+            _sync_star_ratings(scored_assets, gateway, cfg.concurrency)
 
     if cfg.dedup_window > 0:
         print(f"\nDeduplicating burst photos within a {cfg.dedup_window}-second window...")

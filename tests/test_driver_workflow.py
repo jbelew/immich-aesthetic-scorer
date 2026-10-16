@@ -70,6 +70,40 @@ class TestConfigResolution:
         assert cfg.two_stage is False
         assert cfg.dry_run is False
 
+    def test_boolean_cli_flags_can_negate_config_json_values(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "write_ratings": True,
+                    "two_stage": True,
+                    "dry_run": True,
+                    "force_score": True,
+                    "use_cache_only": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = resolve_config(
+            argv=[
+                "--config",
+                str(config_file),
+                "--no-write-ratings",
+                "--no-two-stage",
+                "--no-dry-run",
+                "--no-force-score",
+                "--no-use-cache-only",
+            ],
+            env={},
+        )
+
+        assert cfg.write_ratings is False
+        assert cfg.two_stage is False
+        assert cfg.dry_run is False
+        assert cfg.force_score is False
+        assert cfg.use_cache_only is False
+
 
 def _make_jpeg_bytes(width: int = 800, height: int = 600, color: str = "red") -> bytes:
     import io
@@ -169,8 +203,11 @@ class TestSingleStageWorkflow:
         evaluated_img = Image.open(io.BytesIO(s1_eval.evaluated_images[0]))
         assert max(evaluated_img.size) == 512
 
-        # All 3 scored assets have their calibrated star ratings synced before burst deduplication
-        assert gateway.update_asset_rating.call_count == 3
+        # All 3 scored assets have their calibrated star ratings synced in batches by star bucket
+        synced_ids = [
+            aid for call in gateway.update_assets_rating.call_args_list for aid in call.args[0]
+        ]
+        assert sorted(synced_ids) == ["a1", "a2", "a3"]
 
         # Burst deduplication within 10s keeps a2 (score > a3) and a1 -> 2 assets in album
         assert [item["id"] for item in top_assets] == ["a2", "a1"]
@@ -247,6 +284,7 @@ class TestTwoStageWorkflow:
             stage2_top_pct=50.0,
             stage2_model="musiq-spaq",
             stage2_weight=0.5,
+            write_ratings=True,
             dry_run=True,
             limit=2,
             concurrency=1,
@@ -270,7 +308,9 @@ class TestTwoStageWorkflow:
         s2_img = Image.open(io.BytesIO(s2_eval.evaluated_images[0]))
         assert s2_img.size == (1000, 800)
 
-        # Dry run skips album creation/addition
+        # Dry run skips both star rating sync and album creation/addition
+        gateway.update_assets_rating.assert_not_called()
+        gateway.update_asset_rating.assert_not_called()
         gateway.ensure_album_with_assets.assert_not_called()
 
         # Candidate entries have Two-stage reason and persisted Stage 2 metadata;

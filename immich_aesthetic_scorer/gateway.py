@@ -314,6 +314,49 @@ class ImmichGateway:
             batch = unique_ids[i : i + chunk_size]
             self._request("put", assets_endpoint, json={"ids": batch}, timeout=30)
 
+    def update_assets_rating(
+        self,
+        asset_ids: Sequence[str],
+        rating: int,
+        *,
+        chunk_size: int = 100,
+    ) -> None:
+        """Updates the native star rating (`1–5`) on a batch of Immich assets in `chunk_size` chunks.
+
+        Deduplicates `asset_ids` while preserving order before sending `PUT /api/assets`
+        batches (`{"ids": batch, "rating": rating}`).
+
+        Args:
+            asset_ids: Ordered sequence of target asset UUIDs.
+            rating: Star rating integer in the range `1..5`.
+            chunk_size: Maximum asset IDs per `PUT /api/assets` request (default: 100).
+
+        Raises:
+            ValueError: If `rating` is outside `1..5` (or is a boolean) or `chunk_size <= 0`.
+            ImmichGatewayError: If any `PUT /api/assets` request fails.
+        """
+        if isinstance(rating, bool) or not isinstance(rating, int) or not (1 <= rating <= 5):
+            raise ValueError(f"rating must be an integer between 1 and 5, got {rating!r}")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+
+        seen: set[str] = set()
+        unique_ids: list[str] = []
+        for aid in asset_ids:
+            if aid not in seen:
+                seen.add(aid)
+                unique_ids.append(aid)
+
+        endpoint = "/api/assets"
+        for i in range(0, len(unique_ids), chunk_size):
+            batch = unique_ids[i : i + chunk_size]
+            self._request(
+                "put",
+                endpoint,
+                json={"ids": batch, "rating": rating},
+                timeout=10,
+            )
+
     def update_asset_rating(self, asset_id: str, rating: int) -> None:
         """Updates the native star rating (`1–5`) on a single Immich asset.
 
@@ -325,16 +368,7 @@ class ImmichGateway:
             ValueError: If `rating` is outside `1..5` (or is a boolean).
             ImmichGatewayError: If the `PUT /api/assets` request fails.
         """
-        if isinstance(rating, bool) or not isinstance(rating, int) or not (1 <= rating <= 5):
-            raise ValueError(f"rating must be an integer between 1 and 5, got {rating!r}")
-
-        endpoint = "/api/assets"
-        self._request(
-            "put",
-            endpoint,
-            json={"ids": [asset_id], "rating": rating},
-            timeout=10,
-        )
+        self.update_assets_rating([asset_id], rating)
 
     @staticmethod
     def _extract_dict_list(items: Any) -> list[dict[str, Any]]:
