@@ -33,6 +33,14 @@ from immich_aesthetic_scorer.pipeline import (  # noqa: F401
     score_to_stars,
     select_candidates,
 )
+from immich_aesthetic_scorer.store import (  # noqa: F401
+    EvaluationStore,
+    cache_lock,
+    extract_raw_score_from_reason,
+    get_asset_mod_time,
+    load_cache,
+    save_cache,
+)
 
 # Comment out global CUDA disable to allow users with compatible GPUs (compute capability >= 7.0) to use GPU acceleration.
 # Older/unsupported GPUs will gracefully fall back to CPU via device check logic in score_image_local.
@@ -156,63 +164,9 @@ COLOR_RED = "\033[31m"
 COLOR_MAGENTA = "\033[35m"
 COLOR_GRAY = "\033[90m"
 
-# Thread safety lock for cache writes
-cache_lock = threading.RLock()
-
 # Global lock and timestamp to serialize Gemini API calls across all threads (prevents 429 quota bursts)
 gemini_call_lock = threading.Lock()
 last_gemini_call_time = 0.0
-
-
-def load_cache(cache_path):
-    """Loads the local JSON cache file from disk.
-
-    The cache maintains historical score evaluations mapped to asset UUIDs,
-    along with the model IDs used during evaluation to enable smart cache invalidation.
-
-    Args:
-        cache_path (str): File path of the cache file.
-
-    Returns:
-        dict: Cache content dictionary (empty dict if cache does not exist or is corrupted).
-    """
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Warning: Failed to load cache from {cache_path}: {e}. Starting fresh.")
-    return {}
-
-
-def save_cache(cache, cache_path):
-    """Saves cache entries atomically and thread-safely to disk.
-
-    Writes to a temporary file first and renames it to prevent file corruption
-    during write interrupts. Synchronized via global thread RLock.
-
-    Args:
-        cache (dict): Cache content to serialize.
-        cache_path (str): Destination file path.
-    """
-    with cache_lock:
-        try:
-            # Write to a temporary file first, then rename to prevent corruption
-            tmp_path = cache_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(cache, f, indent=2)
-            os.replace(tmp_path, cache_path)
-        except Exception as e:
-            print(f"Error saving cache: {e}")
-
-
-def get_asset_mod_time(asset):
-    """Resolves a sensible modification/creation timestamp for cache invalidation."""
-    mod_time = asset.get("fileModifiedAt")
-    # If the modification time is missing or defaulted to the MS-DOS epoch (1980-01-01), fall back to fileCreatedAt
-    if not mod_time or "1980-01-01" in mod_time:
-        mod_time = asset.get("fileCreatedAt") or asset.get("createdAt")
-    return mod_time
 
 
 def get_or_prompt(env_name, prompt_text, secret=False, default=None):
@@ -1170,30 +1124,6 @@ def add_assets_to_album(immich_url, api_key, album_id, asset_ids):
         print(f"Adding chunk {i//chunk_size + 1} ({len(chunk)} items) to album...")
         r = requests.put(url, json=payload, headers=headers, timeout=30)
         r.raise_for_status()
-
-
-def extract_raw_score_from_reason(reason):
-    """Parses a local aesthetic CLIP score out of a cached reason explanation string.
-
-    Enables reading legacy aesthetic scores saved in older cache versions
-    without repeating local model evaluation.
-
-    Args:
-        reason (str): Reason explanation string from cache.
-
-    Returns:
-        float: Aesthetic score extracted (0.0 to 10.0), or None if parsing fails.
-    """
-    if not reason or "Local CLIP score:" not in reason:
-        return None
-    try:
-        parts = reason.split("Local CLIP score:")
-        if len(parts) > 1:
-            sub = parts[1].split("/10.0")[0].strip()
-            return float(sub)
-    except Exception:
-        pass
-    return None
 
 
 def update_asset_rating(immich_url, api_key, asset_id, rating):
